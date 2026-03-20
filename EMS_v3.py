@@ -4,6 +4,7 @@ Streamlit Cloud compatible | No emojis | 4-step flow | Learning tab
 """
 
 import os, base64, copy
+from typing import Any, Dict, List, Tuple
 import streamlit as st
 import numpy as np
 import matplotlib
@@ -505,29 +506,35 @@ def _calc_kpis(res, mp):
 # ---------------------------------------------------------------------------
 # Alerts
 # ---------------------------------------------------------------------------
-def _check_alerts(mp):
-    erros, avisos = [], []
-    Vl, f = mp["Vl"], mp["f"]
-    Rs, Rr = mp["Rs"], mp["Rr"]
-    Xls, Xlr, Xm = mp["Xls"], mp["Xlr"], mp["Xm"]
-    p, J, B, Tl = int(mp["p"]), mp["J"], mp["B"], mp["Tl"]
+def _check_alerts(mp: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    erros: List[str] = []
+    avisos: List[str] = []
+    Vl:  float = float(mp["Vl"])
+    f:   float = float(mp["f"])
+    Rs:  float = float(mp["Rs"])
+    Rr:  float = float(mp["Rr"])
+    Xls: float = float(mp["Xls"])
+    Xlr: float = float(mp["Xlr"])
+    Xm:  float = float(mp["Xm"])
+    p:   int   = int(mp["p"])
+    J:   float = float(mp["J"])
+    Tl:  float = float(mp["Tl"])
 
-    wb = 2 * pi * f
-    Vm = sqrt(2) * Vl / sqrt(3)
-    Lm = Xm / wb; Lls = Xls / wb; Llr = Xlr / wb
-    Ls = Lls + Lm; Lr = Llr + Lm
+    wb: float = 2.0 * pi * f
+    Vm: float = sqrt(2.0) * Vl / sqrt(3.0)
 
     # Thevenin equivalent
     Zth_num = complex(0, Xm) * complex(Rs, Xls)
     Zth_den = complex(Rs, Xls + Xm)
     Zth = Zth_num / Zth_den if abs(Zth_den) > 1e-12 else complex(0, Xm)
     Vth = Vm * abs(complex(0, Xm)) / abs(Zth_den) if abs(Zth_den) > 1e-12 else Vm
-    Rth = Zth.real; Xth = Zth.imag
+    Rth: float = float(Zth.real)
+    Xth: float = float(Zth.imag)
+    Vth_f: float = float(Vth)
 
     s_Temax = Rr / sqrt(Rth ** 2 + (Xth + Xlr) ** 2)
-    Te_max = (3 / 2) * (p / 2) * Vth ** 2 / (
-        2 * wb / p * (Rth + sqrt(Rth ** 2 + (Xth + Xlr) ** 2))
-    ) if wb > 0 else 0
+    _denom_Te: float = 2.0 * wb / p * (Rth + sqrt(Rth ** 2 + (Xth + Xlr) ** 2))
+    Te_max: float = float((3.0 / 2.0) * (p / 2) * Vth_f ** 2 / _denom_Te) if (wb > 0 and _denom_Te > 1e-12) else 0.0
 
     # 1 — Torque check
     if Tl > Te_max:
@@ -560,11 +567,11 @@ def _check_alerts(mp):
     if sigma_tot > 0 and Xm / sigma_tot < 3:
         avisos.append("Xm pouco dominante em relacao as dispersoes. Acoplamento magnetico fraco.")
 
-    # 6 — Mechanical time constant
+    # 6 — Mechanical time constant: tau = J * ws / Te_max
     ws = 2 * pi * f / (p / 2)
-    tau_mec = J * ws / (Tl + 1e-9)
-    if tau_mec > 10:
-        avisos.append(f"Constante de tempo mecanica elevada ({tau_mec:.1f} s). Partida muito lenta.")
+    tau_mec: float = (J * ws / float(Te_max)) if Te_max > 1e-6 else float("inf")
+    if tau_mec > 5:
+        avisos.append(f"Constante de tempo mecanica elevada ({tau_mec:.2f} s). Partida lenta — considere reduzir J ou aumentar Te_max.")
 
     # 7 — Frequency range
     if f < 45 or f > 65:
