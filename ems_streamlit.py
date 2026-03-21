@@ -379,6 +379,188 @@ def image_placeholder(label: str):
         st.image(uploaded, use_container_width=True)
 
 
+def render_equivalent_circuit(Rs: float, Xls: float, Xm: float, Xlr: float, Rr: float, dark: bool) -> None:
+    """
+    Desenha o circuito equivalente monofasico da MIT com Plotly.
+    Topologia: Vs --- Rs --- jXls ---+--- jXlr --- Rr/s ---
+                                     |
+                                    jXm
+                                     |
+                                    GND
+    """
+    bg   = "#0e1117" if dark else "#ffffff"
+    fg   = "#e8eaf0" if dark else "#1a1d2e"
+    wire = "#4f8ef7" if dark else "#1a56db"
+    comp = "#f97316"  # cor dos componentes
+    lw   = 2.5
+
+    fig = go.Figure()
+
+    def line(x0, y0, x1, y1, color=wire, width=lw, dash="solid"):
+        fig.add_shape(type="line", x0=x0, y0=y0, x1=x1, y1=y1,
+                      line=dict(color=color, width=width, dash=dash))
+
+    def label(x, y, text, size=11, color=fg, anchor="center"):
+        fig.add_annotation(x=x, y=y, text=text, showarrow=False,
+                           font=dict(size=size, color=color, family="Inter, monospace"),
+                           xanchor=anchor, yanchor="middle")
+
+    def resistor(x0, y, width=1.0, label_text="", val_text=""):
+        """Resistor horizontal: linha ziguezague simplificada (retangulo estreito)."""
+        n_teeth = 5
+        seg = width / (n_teeth * 2)
+        xs = [x0]
+        ys = [y]
+        xs.append(x0 + seg)
+        ys.append(y)
+        for i in range(n_teeth):
+            xs += [x0 + seg + i * 2 * seg + seg, x0 + seg + i * 2 * seg + 2 * seg]
+            ys += [y + 0.18, y - 0.18]
+        xs.append(x0 + width - seg)
+        ys.append(y)
+        xs.append(x0 + width)
+        ys.append(y)
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines",
+            line=dict(color=comp, width=lw),
+            showlegend=False, hoverinfo="skip",
+        ))
+        label(x0 + width / 2, y + 0.35, label_text, size=10, color=comp)
+        label(x0 + width / 2, y - 0.35, val_text, size=9, color=fg)
+
+    def inductor(x0, y, width=1.0, label_text="", val_text=""):
+        """Indutor horizontal: arcos semicirculares."""
+        n_arcs = 4
+        arc_w  = width / n_arcs
+        t      = np.linspace(0, np.pi, 20)
+        xs_all, ys_all = [], []
+        for i in range(n_arcs):
+            cx = x0 + i * arc_w + arc_w / 2
+            xs_all += list(cx + (arc_w / 2) * np.cos(t + np.pi))
+            ys_all += list(y  + (arc_w / 2) * 0.8 * np.sin(t))
+            if i < n_arcs - 1:
+                xs_all.append(None)
+                ys_all.append(None)
+        fig.add_trace(go.Scatter(
+            x=xs_all, y=ys_all, mode="lines",
+            line=dict(color=comp, width=lw),
+            showlegend=False, hoverinfo="skip",
+        ))
+        label(x0 + width / 2, y + 0.38, label_text, size=10, color=comp)
+        label(x0 + width / 2, y - 0.35, val_text, size=9, color=fg)
+
+    def inductor_vert(x, y0, height=1.0, label_text="", val_text=""):
+        """Indutor vertical: arcos."""
+        n_arcs = 3
+        arc_h  = height / n_arcs
+        t      = np.linspace(0, np.pi, 20)
+        xs_all, ys_all = [], []
+        for i in range(n_arcs):
+            cy = y0 - i * arc_h - arc_h / 2
+            xs_all += list(x + (arc_h / 2) * 0.8 * np.sin(t))
+            ys_all += list(cy + (arc_h / 2) * np.cos(t + np.pi))
+            if i < n_arcs - 1:
+                xs_all.append(None)
+                ys_all.append(None)
+        fig.add_trace(go.Scatter(
+            x=xs_all, y=ys_all, mode="lines",
+            line=dict(color=comp, width=lw),
+            showlegend=False, hoverinfo="skip",
+        ))
+        label(x + 0.52, y0 - height / 2, label_text, size=10, color=comp, anchor="left")
+        label(x + 0.52, y0 - height / 2 - 0.3, val_text, size=9, color=fg, anchor="left")
+
+    # ---- coordenadas do circuito ----
+    y_top  = 2.0   # fio superior
+    y_bot  = 0.0   # fio inferior (GND)
+    y_mid  = (y_top + y_bot) / 2
+
+    # posicoes horizontais
+    x_vs0  = 0.0   # inicio fonte
+    x_vs1  = 0.5   # fim fonte / inicio Rs
+    x_rs1  = 1.7   # fim Rs
+    x_xls1 = 3.0   # fim Xls
+    x_node = 3.4   # no de juncao (antes do ramo Xm)
+    x_xlr0 = 3.8   # inicio Xlr
+    x_xlr1 = 5.1   # fim Xlr
+    x_rrs0 = 5.5   # inicio Rr/s
+    x_rrs1 = 6.8   # fim Rr/s
+    x_end  = 7.2   # fim do circuito
+
+    # --- fios horizontais superiores ---
+    line(x_vs1,  y_top, x_rs1,  y_top)   # entrada -> Rs (conector)
+    line(x_xls1, y_top, x_node, y_top)   # Xls -> no
+    line(x_node, y_top, x_xlr0, y_top)   # no -> Xlr
+    line(x_xlr1, y_top, x_rrs0, y_top)   # Xlr -> Rr/s
+    line(x_rrs1, y_top, x_end,  y_top)   # Rr/s -> fim
+
+    # --- fio inferior (retorno) ---
+    line(x_vs0, y_bot, x_end, y_bot)
+
+    # --- fonte de tensao (lado esquerdo) ---
+    # circulo da fonte
+    fig.add_shape(type="circle",
+                  x0=x_vs0 - 0.05, y0=y_bot + 0.05,
+                  x1=x_vs0 + 0.05, y1=y_bot + 0.05 + (y_top - y_bot),
+                  line=dict(color=wire, width=lw),
+                  fillcolor=bg)
+    label(x_vs0, y_mid, "Vs", size=11, color=wire)
+    label(x_vs0 - 0.45, y_mid + 0.3, "+", size=13, color=wire)
+    label(x_vs0 - 0.45, y_mid - 0.3, "−", size=13, color=wire)
+
+    # fio da fonte ao primeiro elemento
+    line(x_vs0, y_top, x_vs1, y_top)
+    line(x_vs0, y_bot, x_vs0, y_bot)  # ponto base
+
+    # --- Rs ---
+    resistor(x_vs1, y_top, width=x_rs1 - x_vs1,
+             label_text="Rs",
+             val_text=f"{Rs:.3f} Ω")
+
+    # --- jXls ---
+    inductor(x_rs1, y_top, width=x_xls1 - x_rs1,
+             label_text="jXls",
+             val_text=f"{Xls:.3f} Ω")
+
+    # --- jXm (vertical, no ramo de magnetizacao) ---
+    line(x_node, y_top, x_node, y_top - 0.25)           # fio de descida ate indutor
+    inductor_vert(x_node, y_top - 0.25, height=1.1,
+                  label_text="jXm",
+                  val_text=f"{Xm:.2f} Ω")
+    line(x_node, y_bot + 0.25, x_node, y_bot)           # fio ao GND
+
+    # --- jXlr ---
+    inductor(x_xlr0, y_top, width=x_xlr1 - x_xlr0,
+             label_text="jXlr",
+             val_text=f"{Xlr:.3f} Ω")
+
+    # --- Rr/s (representado como Rr com nota) ---
+    resistor(x_rrs0, y_top, width=x_rrs1 - x_rrs0,
+             label_text="Rr/s",
+             val_text=f"{Rr:.3f} Ω")
+
+    # --- fios verticais de fechamento ---
+    line(x_vs0, y_top, x_vs0, y_top)
+    line(x_end, y_top, x_end, y_bot)   # fechamento direito
+
+    # --- nota de slip ---
+    label(x_rrs0 + (x_rrs1 - x_rrs0) / 2, y_bot - 0.5,
+          "s = escorregamento", size=8, color=fg)
+
+    fig.update_layout(
+        height=260,
+        margin=dict(l=40, r=20, t=10, b=30),
+        paper_bgcolor=bg,
+        plot_bgcolor=bg,
+        xaxis=dict(visible=False, range=[-0.7, 7.6]),
+        yaxis=dict(visible=False, range=[-0.8, 2.7]),
+        showlegend=False,
+        hovermode=False,
+    )
+
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
 # =============================================================================
 # SECAO 4 — SIDEBAR
 # =============================================================================
@@ -450,8 +632,11 @@ def render_machine_params() -> MachineParams:
         ref_map = {"Sincrono (w_ref = we)": 1, "Rotorico (w_ref = wr)": 2, "Estacionario (w_ref = 0)": 3}
 
         st.markdown("")
-        st.markdown('<div class="section-title">Diagrama do Circuito Equivalente</div>', unsafe_allow_html=True)
-        image_placeholder("Circuito Equivalente Monofasico da MIT")
+        st.markdown('<div class="section-title">Circuito Equivalente Monofasico</div>', unsafe_allow_html=True)
+        render_equivalent_circuit(
+            Rs=Rs, Xls=Xls, Xm=Xm, Xlr=Xlr, Rr=Rr,
+            dark=st.session_state.get("dark_mode", True),
+        )
 
     mp = MachineParams(Vl=Vl, f=f, Rs=Rs, Rr=Rr, Xm=Xm, Xls=Xls, Xlr=Xlr, p=p, J=J, B=B)
 
