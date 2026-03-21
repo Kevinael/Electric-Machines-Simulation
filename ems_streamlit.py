@@ -651,99 +651,93 @@ def render_experiment_config(mp: MachineParams) -> dict:
 
 def render_circuit(mp: MachineParams, dark: bool) -> None:
     """Desenha o circuito equivalente monofásico em T da MIT com schemdraw."""
-    c        = _palette(dark)
-    bg_hex   = "#0d1117" if dark else "#ffffff"
-    fg_hex   = c["text"]
-    comp_hex = "#f97316"   # laranja — componentes
-    src_hex  = "#a78bfa"   # roxo — fonte
+    c      = _palette(dark)
+    bg_hex = "#0d1117" if dark else "#ffffff"
+    wire   = "#e4e8f5" if dark else "#111827"   # monocromático — fios e componentes
+    muted  = c["muted"]
 
-    fig_mpl, ax = plt.subplots(figsize=(9, 3.2))
+    OFST   = 0.22   # offset uniforme acima/abaixo/esq/dir para todas as labels
+    FS     = 9      # tamanho fonte — nome do componente
+    FS_VAL = 8      # tamanho fonte — valor numérico
+
+    fig_mpl, ax = plt.subplots(figsize=(10, 3.8))
     fig_mpl.patch.set_facecolor(bg_hex)
     ax.set_facecolor(bg_hex)
+    ax.set_axis_off()   # remove eixos, ticks e labels dos eixos
 
     with schemdraw.Drawing(canvas=ax) as d:
-        d.config(fontsize=10, color=fg_hex)
+        d.config(fontsize=10, color=wire)
 
         # ── fonte de tensão Vs ──────────────────────────────────────────
         src = d.add(
             elm.SourceSin()
             .up()
-            .color(src_hex)
-            .label(r"$V_s$", loc="right", color=src_hex)
+            .color(wire)
+            .label(r"$V_s$", loc="right", color=wire)
             .length(d.unit)
         )
 
         # ── fio superior saindo da fonte ────────────────────────────────
-        d.add(elm.Line().right().length(0.5))
+        d.add(elm.Line().right().length(0.4))
 
-        # ── Rs ──────────────────────────────────────────────────────────
+        # ── Rs (horizontal: nome em cima, valor embaixo, offset igual) ──
         d.add(
-            elm.Resistor()
-            .right()
-            .color(comp_hex)
-            .label(r"$R_s$", loc="top", color=comp_hex)
-            .label(f"{mp.Rs:.3f} Ω", loc="bot", color=fg_hex, fontsize=8)
+            elm.Resistor().right().color(wire)
+            .label(r"$R_s$",           loc="top", ofst=OFST, fontsize=FS,     color=wire)
+            .label(f"{mp.Rs:.3f} Ω",   loc="bot", ofst=OFST, fontsize=FS_VAL, color=wire)
         )
 
-        # ── jXls ────────────────────────────────────────────────────────
+        # ── jXls (horizontal) ───────────────────────────────────────────
         d.add(
-            elm.Inductor2()
-            .right()
-            .color(comp_hex)
-            .label(r"$jX_{ls}$", loc="top", color=comp_hex)
-            .label(f"{mp.Xls:.3f} Ω", loc="bot", color=fg_hex, fontsize=8)
+            elm.Inductor2().right().color(wire)
+            .label(r"$jX_{ls}$",        loc="top", ofst=OFST, fontsize=FS,     color=wire)
+            .label(f"{mp.Xls:.3f} Ω",   loc="bot", ofst=OFST, fontsize=FS_VAL, color=wire)
         )
 
-        # ── nó T (ponto de junção com ramo jXm) ─────────────────────────
-        T_node = d.add(elm.Dot(open=True).color(fg_hex))
+        # ── nó T ────────────────────────────────────────────────────────
+        T_node = d.add(elm.Dot(open=True).color(wire))
 
-        # ── jXlr ────────────────────────────────────────────────────────
+        # ── jXlr (horizontal) ───────────────────────────────────────────
         d.add(
-            elm.Inductor2()
-            .right()
-            .color(comp_hex)
-            .label(r"$jX_{lr}$", loc="top", color=comp_hex)
-            .label(f"{mp.Xlr:.3f} Ω", loc="bot", color=fg_hex, fontsize=8)
+            elm.Inductor2().right().color(wire)
+            .label(r"$jX_{lr}$",        loc="top", ofst=OFST, fontsize=FS,     color=wire)
+            .label(f"{mp.Xlr:.3f} Ω",   loc="bot", ofst=OFST, fontsize=FS_VAL, color=wire)
         )
 
-        # ── Rr/s ────────────────────────────────────────────────────────
+        # ── Rr/s (horizontal) ───────────────────────────────────────────
         d.add(
-            elm.Resistor()
-            .right()
-            .color(comp_hex)
-            .label(r"$R_r/s$", loc="top", color=comp_hex)
-            .label(f"{mp.Rr:.3f} Ω / s", loc="bot", color=fg_hex, fontsize=8)
+            elm.Resistor().right().color(wire)
+            .label(r"$R_r/s$",           loc="top", ofst=OFST, fontsize=FS,     color=wire)
+            .label(f"{mp.Rr:.3f} Ω/s",  loc="bot", ofst=OFST, fontsize=FS_VAL, color=wire)
         )
 
-        # ── fio de retorno (desce, volta pela base) ─────────────────────
+        # ── fio de retorno ──────────────────────────────────────────────
         d.add(elm.Line().down().length(d.unit))
         bot_right = d.here
         d.add(elm.Line().left().tox(src.start))
         d.add(elm.Line().up().toy(src.start))
 
-        # ── ramo shunt jXm (desce do nó T até a base) ───────────────────
-        d.add(elm.Line().at(T_node.end).down().length(0.35))
+        # ── ramo shunt jXm (vertical: nome à esquerda, valor à direita) ─
+        d.add(elm.Line().at(T_node.end).down().length(0.3))
         d.add(
-            elm.Inductor2()
-            .down()
-            .color(comp_hex)
-            .label(r"$jX_m$", loc="right", color=comp_hex)
-            .label(f"{mp.Xm:.2f} Ω", loc="left", color=fg_hex, fontsize=8)
+            elm.Inductor2().down().color(wire)
+            .label(r"$jX_m$",          loc="left",  ofst=OFST, fontsize=FS,     color=wire)
+            .label(f"{mp.Xm:.2f} Ω",  loc="right", ofst=OFST, fontsize=FS_VAL, color=wire)
         )
         d.add(elm.Line().down().toy(bot_right))
-        d.add(elm.Ground().color(fg_hex))
+        d.add(elm.Ground().color(wire))
 
     # nota de escorregamento
     ax.text(
-        0.5, -0.05,
+        0.5, 0.01,
         "s = (ns − n) / ns  (escorregamento)",
         transform=ax.transAxes,
-        ha="center", va="top",
-        fontsize=8, color=c["muted"],
+        ha="center", va="bottom",
+        fontsize=8, color=muted,
         fontfamily="monospace",
     )
 
-    plt.tight_layout(pad=0.3)
+    fig_mpl.subplots_adjust(left=0.04, right=0.96, top=0.96, bottom=0.08)
 
     buf = io.BytesIO()
     fig_mpl.savefig(buf, format="png", dpi=150, facecolor=bg_hex, bbox_inches="tight")
