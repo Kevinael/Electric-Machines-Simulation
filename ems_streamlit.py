@@ -15,12 +15,18 @@ Blocos:
 """
 
 from __future__ import annotations
+import io
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.integrate import odeint
 from dataclasses import dataclass, field
+import schemdraw
+import schemdraw.elements as elm
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURAÇÃO DA PÁGINA
@@ -640,134 +646,111 @@ def render_experiment_config(mp: MachineParams) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BLOCO E — CIRCUITO EQUIVALENTE (Plotly)
+# BLOCO E — CIRCUITO EQUIVALENTE (schemdraw)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _resistor_pts(x0, y, w, n=6):
-    seg = w / (2*n + 2)
-    xs, ys = [x0, x0+seg], [y, y]
-    for i in range(n):
-        xs += [x0+seg+(2*i+1)*seg, x0+seg+(2*i+2)*seg]
-        ys += [y+0.16, y-0.16]
-    xs += [x0+w-seg, x0+w]; ys += [y, y]
-    return xs, ys
-
-
-def _inductor_pts(x0, y, w, n=4):
-    aw = w / n
-    t  = np.linspace(np.pi, 0, 22)
-    xs, ys = [], []
-    for i in range(n):
-        cx = x0 + (i+0.5)*aw
-        xs += list(cx + (aw/2)*np.cos(t))
-        ys += list(y  + (aw/2)*0.62*np.sin(t))
-        if i < n-1: xs.append(None); ys.append(None)
-    return xs, ys
-
-
-def _inductor_vert_pts(x, y0, h, n=3):
-    ah = h / n
-    t  = np.linspace(np.pi, 0, 22)
-    xs, ys = [], []
-    for i in range(n):
-        cy = y0 - (i+0.5)*ah
-        xs += list(x + (ah/2)*0.62*np.sin(t))
-        ys += list(cy + (ah/2)*np.cos(t))
-        if i < n-1: xs.append(None); ys.append(None)
-    return xs, ys
-
-
 def render_circuit(mp: MachineParams, dark: bool) -> None:
-    """Desenha o circuito equivalente monofásico em T da MIT com Plotly."""
-    c   = _palette(dark)
-    bg  = "#0d1117" if dark else "#ffffff"
-    fg  = c["text"]
-    wire = c["accent"]
-    comp = "#f97316"
-    src  = "#a78bfa"
-    lw   = 2.1
+    """Desenha o circuito equivalente monofásico em T da MIT com schemdraw."""
+    c        = _palette(dark)
+    bg_hex   = "#0d1117" if dark else "#ffffff"
+    fg_hex   = c["text"]
+    comp_hex = "#f97316"   # laranja — componentes
+    src_hex  = "#a78bfa"   # roxo — fonte
 
-    fig = go.Figure()
+    fig_mpl, ax = plt.subplots(figsize=(9, 3.2))
+    fig_mpl.patch.set_facecolor(bg_hex)
+    ax.set_facecolor(bg_hex)
 
-    def wire_line(x0, y0, x1, y1, col=None):
-        fig.add_shape(type="line", x0=x0, y0=y0, x1=x1, y1=y1,
-                      line=dict(color=col or wire, width=lw))
+    with schemdraw.Drawing(canvas=ax) as d:
+        d.config(fontsize=10, color=fg_hex)
 
-    def ann(x, y, txt, sz=11, col=None, anch="center"):
-        fig.add_annotation(x=x, y=y, text=txt, showarrow=False,
-                           font=dict(size=sz, color=col or fg,
-                                     family="Inter,'Courier New',monospace"),
-                           xanchor=anch, yanchor="middle",
-                           bgcolor="rgba(0,0,0,0)")
+        # ── fonte de tensão Vs ──────────────────────────────────────────
+        src = d.add(
+            elm.SourceSin()
+            .up()
+            .color(src_hex)
+            .label(r"$V_s$", loc="right", color=src_hex)
+            .length(d.unit)
+        )
 
-    def trace(xs, ys):
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines",
-                                 line=dict(color=comp, width=lw),
-                                 showlegend=False, hoverinfo="skip"))
+        # ── fio superior saindo da fonte ────────────────────────────────
+        d.add(elm.Line().right().length(0.5))
 
-    # coordenadas
-    Y, G = 2.0, 0.0
-    X0=0.3; X1=0.75; XR0=0.75; XR1=2.05; XL0=2.05; XL1=3.35
-    XN=3.7; XLR0=4.05; XLR1=5.35; XRR0=5.35; XRR1=6.75; XE=7.05
+        # ── Rs ──────────────────────────────────────────────────────────
+        d.add(
+            elm.Resistor()
+            .right()
+            .color(comp_hex)
+            .label(r"$R_s$", loc="top", color=comp_hex)
+            .label(f"{mp.Rs:.3f} Ω", loc="bot", color=fg_hex, fontsize=8)
+        )
 
-    # fios
-    wire_line(X1,   Y, XR0,  Y)
-    wire_line(XL1,  Y, XN,   Y)
-    wire_line(XN,   Y, XLR0, Y)
-    wire_line(XLR1, Y, XRR0, Y)
-    wire_line(XRR1, Y, XE,   Y)
-    wire_line(X0-0.22, G, XE, G)
-    wire_line(XE,   Y, XE,   G)
+        # ── jXls ────────────────────────────────────────────────────────
+        d.add(
+            elm.Inductor2()
+            .right()
+            .color(comp_hex)
+            .label(r"$jX_{ls}$", loc="top", color=comp_hex)
+            .label(f"{mp.Xls:.3f} Ω", loc="bot", color=fg_hex, fontsize=8)
+        )
 
-    # fonte Vs
-    fig.add_shape(type="circle",
-                  x0=X0-0.22, y0=G+0.06, x1=X0+0.22, y1=Y-0.06,
-                  line=dict(color=src, width=lw+0.5), fillcolor=bg)
-    wire_line(X0+0.22, Y, X1, Y)
-    wire_line(X0-0.22, G+0.06, X0-0.22, G)
-    ann(X0, 1.0, "Vs", 11, src)
-    ann(X0-0.5, 1.3, "+", 13, src)
-    ann(X0-0.5, 0.7, "−", 13, src)
+        # ── nó T (ponto de junção com ramo jXm) ─────────────────────────
+        T_node = d.add(elm.Dot(open=True).color(fg_hex))
 
-    # Rs
-    trace(*_resistor_pts(XR0, Y, XR1-XR0))
-    ann((XR0+XR1)/2, Y+0.35, "Rs",                   10, comp)
-    ann((XR0+XR1)/2, Y-0.34, f"{mp.Rs:.3f} Ω",       9,  fg)
+        # ── jXlr ────────────────────────────────────────────────────────
+        d.add(
+            elm.Inductor2()
+            .right()
+            .color(comp_hex)
+            .label(r"$jX_{lr}$", loc="top", color=comp_hex)
+            .label(f"{mp.Xlr:.3f} Ω", loc="bot", color=fg_hex, fontsize=8)
+        )
 
-    # jXls
-    trace(*_inductor_pts(XL0, Y, XL1-XL0))
-    ann((XL0+XL1)/2, Y+0.38, "jX<sub>ls</sub>",      10, comp)
-    ann((XL0+XL1)/2, Y-0.34, f"{mp.Xls:.3f} Ω",      9,  fg)
+        # ── Rr/s ────────────────────────────────────────────────────────
+        d.add(
+            elm.Resistor()
+            .right()
+            .color(comp_hex)
+            .label(r"$R_r/s$", loc="top", color=comp_hex)
+            .label(f"{mp.Rr:.3f} Ω / s", loc="bot", color=fg_hex, fontsize=8)
+        )
 
-    # jXm (vertical)
-    wire_line(XN, Y, XN, Y-0.2)
-    wire_line(XN, G+0.2, XN, G)
-    trace(*_inductor_vert_pts(XN, Y-0.2, 1.2))
-    ann(XN+0.44, 1.05, "jX<sub>m</sub>",              10, comp, "left")
-    ann(XN+0.44, 0.72, f"{mp.Xm:.2f} Ω",              9,  fg,  "left")
+        # ── fio de retorno (desce, volta pela base) ─────────────────────
+        d.add(elm.Line().down().length(d.unit))
+        bot_right = d.here
+        d.add(elm.Line().left().tox(src.start))
+        d.add(elm.Line().up().toy(src.start))
 
-    # jXlr
-    trace(*_inductor_pts(XLR0, Y, XLR1-XLR0))
-    ann((XLR0+XLR1)/2, Y+0.38, "jX<sub>lr</sub>",    10, comp)
-    ann((XLR0+XLR1)/2, Y-0.34, f"{mp.Xlr:.3f} Ω",    9,  fg)
+        # ── ramo shunt jXm (desce do nó T até a base) ───────────────────
+        d.add(elm.Line().at(T_node.end).down().length(0.35))
+        d.add(
+            elm.Inductor2()
+            .down()
+            .color(comp_hex)
+            .label(r"$jX_m$", loc="right", color=comp_hex)
+            .label(f"{mp.Xm:.2f} Ω", loc="left", color=fg_hex, fontsize=8)
+        )
+        d.add(elm.Line().down().toy(bot_right))
+        d.add(elm.Ground().color(fg_hex))
 
-    # Rr/s
-    trace(*_resistor_pts(XRR0, Y, XRR1-XRR0))
-    ann((XRR0+XRR1)/2, Y+0.35, "R<sub>r</sub> / s",  10, comp)
-    ann((XRR0+XRR1)/2, Y-0.34, f"{mp.Rr:.3f} Ω / s", 9,  fg)
-
-    # nota
-    ann((XRR0+XRR1)/2, G-0.45,
-        "s = (n<sub>s</sub> − n) / n<sub>s</sub>  (escorregamento)", 8, c["muted"])
-
-    fig.update_layout(
-        height=265, margin=dict(l=25, r=15, t=10, b=48),
-        paper_bgcolor=bg, plot_bgcolor=bg,
-        xaxis=dict(visible=False, range=[-0.25, 7.6]),
-        yaxis=dict(visible=False, range=[-0.72, 2.65]),
-        showlegend=False, hovermode=False,
+    # nota de escorregamento
+    ax.text(
+        0.5, -0.05,
+        "s = (ns − n) / ns  (escorregamento)",
+        transform=ax.transAxes,
+        ha="center", va="top",
+        fontsize=8, color=c["muted"],
+        fontfamily="monospace",
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    plt.tight_layout(pad=0.3)
+
+    buf = io.BytesIO()
+    fig_mpl.savefig(buf, format="svg", facecolor=bg_hex, bbox_inches="tight")
+    plt.close(fig_mpl)
+    buf.seek(0)
+
+    st.image(buf.read(), use_container_width=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
