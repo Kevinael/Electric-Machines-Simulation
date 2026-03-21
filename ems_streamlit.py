@@ -746,11 +746,11 @@ def render_circuit(mp: MachineParams, dark: bool) -> None:
     plt.tight_layout(pad=0.3)
 
     buf = io.BytesIO()
-    fig_mpl.savefig(buf, format="svg", facecolor=bg_hex, bbox_inches="tight")
+    fig_mpl.savefig(buf, format="png", dpi=150, facecolor=bg_hex, bbox_inches="tight")
     plt.close(fig_mpl)
     buf.seek(0)
 
-    st.image(buf.read(), use_container_width=True)
+    st.image(buf, use_container_width=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
