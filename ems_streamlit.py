@@ -663,9 +663,7 @@ def render_experiment_config(mp: MachineParams):
         "Partida Estrela-Triangulo (Y-D)": "yd",
         "Partida com Autotransformador (Compensadora)": "comp",
         "Soft-Starter (Rampa de Tensao)": "soft",
-        "Aplicacao de Carga Nominal em Vazio": "carga_nom",
-        "Aplicacao de 50% da Carga Nominal": "carga_50",
-        "Sobrecarga (120% do Nominal)": "sobrecarga",
+        "Aplicacao de Carga (partida em vazio)": "carga",
         "Operacao como Gerador": "gerador",
     }
 
@@ -680,16 +678,18 @@ def render_experiment_config(mp: MachineParams):
         st.markdown('<div class="section-title">Parametros de Carga e Tensao</div>', unsafe_allow_html=True)
 
         if exp_type == "dol":
-            config["Tl_final"] = st.number_input("Torque de carga nominal (N.m)", value=80.0, min_value=0.0)
+            config["Tl_final"] = st.number_input("Torque de carga (N.m)", value=80.0, min_value=0.0)
             config["t_carga"]  = st.number_input("Instante de aplicacao da carga (s)", value=0.1, min_value=0.0)
 
         elif exp_type == "yd":
-            config["t_2"]     = st.number_input("Instante de comutacao Y -> D (s)", value=0.5, min_value=0.01)
-            config["t_carga"] = st.number_input("Instante de aplicacao da carga (s)", value=0.1, min_value=0.0)
+            config["Tl_final"] = st.number_input("Torque de carga (N.m)", value=80.0, min_value=0.0)
+            config["t_2"]      = st.number_input("Instante de comutacao Y -> D (s)", value=0.5, min_value=0.01)
+            config["t_carga"]  = st.number_input("Instante de aplicacao da carga (s)", value=0.1, min_value=0.0)
             info_box("A tensao em estrela e reduzida a Vl / raiz(3). A comutacao para triangulo ocorre em t_2.")
 
         elif exp_type == "comp":
-            config["voltage_ratio"] = st.slider("Tap do autotransformador (%)", 30, 90, 50) / 100.0
+            config["Tl_final"]      = st.number_input("Torque de carga (N.m)", value=80.0, min_value=0.0)
+            config["voltage_ratio"] = st.slider("Tap do autotransformador (%)", 10, 95, 50) / 100.0
             config["t_2"]           = st.number_input("Instante de comutacao (s)", value=0.5, min_value=0.01)
             config["t_carga"]       = st.number_input("Instante de aplicacao da carga (s)", value=0.1, min_value=0.0)
             info_box(f"Tensao inicial = {config['voltage_ratio']*100:.0f}% de Vl nominal.")
@@ -701,11 +701,19 @@ def render_experiment_config(mp: MachineParams):
             config["Tl_final"]      = st.number_input("Torque de carga (N.m)", value=80.0, min_value=0.0)
             config["t_carga"]       = st.number_input("Instante de aplicacao da carga (s)", value=0.1, min_value=0.0)
 
-        elif exp_type in ("carga_nom", "carga_50", "sobrecarga"):
-            labels = {"carga_nom": 80.0, "carga_50": 40.0, "sobrecarga": 96.0}
-            config["Tl_final"] = labels[exp_type]
+        elif exp_type == "carga":
+            Tl_nom = st.number_input("Torque nominal de referencia (N.m)", value=80.0, min_value=0.1,
+                                     help="Valor base sobre o qual o percentual e aplicado.")
+            pct    = st.slider("Percentual da carga (%)", min_value=1, max_value=300, value=100,
+                               help="Valores abaixo de 100% simulam carga parcial; acima de 100% simulam sobrecarga.")
+            config["Tl_final"] = Tl_nom * pct / 100.0
             config["t_carga"]  = st.number_input("Instante de aplicacao da carga (s)", value=1.0, min_value=0.0)
-            info_box(f"Torque de carga fixo: {config['Tl_final']:.1f} N.m")
+            Tl_calc = config["Tl_final"]
+            regime  = "nominal" if pct == 100 else ("sobrecarga" if pct > 100 else "carga parcial")
+            info_box(
+                f"Torque aplicado: <strong>{Tl_calc:.2f} N.m</strong> "
+                f"({pct}% de {Tl_nom:.1f} N.m) — {regime}"
+            )
 
         elif exp_type == "gerador":
             config["Tl_mec"] = st.number_input("Torque mecanico da turbina (N.m)", value=80.0, min_value=1.0)
@@ -938,14 +946,16 @@ def build_voltage_and_torque_fns(config: dict, mp: MachineParams):
 
     elif exp == "yd":
         Vl_Y = mp.Vl / np.sqrt(3.0)
+        Tl_yd = config["Tl_final"]
         vfn  = lambda t: voltage_reduced_start(t, mp.Vl, Vl_Y, config["t_2"])
-        tfn  = lambda t: torque_step(t, 0.0, 80.0, config["t_carga"])
+        tfn  = lambda t: torque_step(t, 0.0, Tl_yd, config["t_carga"])
         t_events = [config["t_2"], config["t_carga"]]
 
     elif exp == "comp":
-        Vl_red = mp.Vl * config["voltage_ratio"]
+        Vl_red  = mp.Vl * config["voltage_ratio"]
+        Tl_comp = config["Tl_final"]
         vfn    = lambda t: voltage_reduced_start(t, mp.Vl, Vl_red, config["t_2"])
-        tfn    = lambda t: torque_step(t, 0.0, 80.0, config["t_carga"])
+        tfn    = lambda t: torque_step(t, 0.0, Tl_comp, config["t_carga"])
         t_events = [config["t_2"], config["t_carga"]]
 
     elif exp == "soft":
@@ -954,7 +964,7 @@ def build_voltage_and_torque_fns(config: dict, mp: MachineParams):
         tfn = lambda t: torque_step(t, 0.0, config["Tl_final"], config["t_carga"])
         t_events = [config["t_2"], config["t_pico"], config["t_carga"]]
 
-    elif exp in ("carga_nom", "carga_50", "sobrecarga"):
+    elif exp == "carga":
         vfn = lambda t: mp.Vl
         tfn = lambda t: torque_step(t, 0.0, config["Tl_final"], config["t_carga"])
         t_events = [config["t_carga"]]
