@@ -1,42 +1,39 @@
 # -*- coding: utf-8 -*-
 """
-ems_streamlit.py — Interface Streamlit para o Simulador de Maquina de Inducao Trifasica
-Baseado no modelo 0dq de Krause (EMS_BASE.py).
+ems_streamlit.py — Simulador de Maquinas Eletricas
+Modelo 0dq de Krause — Integracao RK4 (scipy.odeint)
 
-Estrutura modular:
-  - render_sidebar()          : toggle de tema e navegacao
-  - render_machine_params()   : formulario de parametros da maquina
-  - render_experiment_config(): configuracao do experimento e torque
-  - render_time_config()      : tempo de simulacao e passo de integracao
-  - render_variable_selector(): escolha das variaveis a plotar
-  - run_and_plot()            : executa simulacao e exibe graficos Plotly
-  - render_learning_tab()     : aba educacional sem valores numericos
+Estrutura de modulos:
+  BLOCO A — Modelo matematico (nucleo fisico, inalterado)
+  BLOCO B — Tema e CSS
+  BLOCO C — Selecao de maquina (tela inicial)
+  BLOCO D — Aba Simulacao
+  BLOCO E — Aba Circuito Equivalente
+  BLOCO F — Aba Resultados
+  BLOCO G — Aba Teoria
+  BLOCO H — Orquestrador principal
 """
 
 from __future__ import annotations
-
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.integrate import odeint
 from dataclasses import dataclass, field
-from typing import Callable
 
-# =============================================================================
-# CONFIGURACAO DA PAGINA (deve ser a primeira chamada Streamlit)
-# =============================================================================
-
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURACAO DA PAGINA
+# ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Simulador MIT — Modelo dq de Krause",
-    page_icon=None,
+    page_title="Simulador de Maquinas Eletricas",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-# =============================================================================
-# SECAO 1 — MODELO MATEMATICO (nucleo fisico, identico ao EMS_BASE.py)
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCO A — MODELO MATEMATICO (logica original preservada integralmente)
+# ═════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class MachineParams:
@@ -73,45 +70,46 @@ def induction_motor_ode(states, t, Vqs, Vds, Tl, w_ref, mp):
     slip_ref = (w_ref - wr) / mp.wb
     dPSIqr = mp.wb * (-slip_ref * PSIdr + (mp.Rr / mp.Xlr) * (PSImq - PSIqr))
     dPSIdr = mp.wb * ( slip_ref * PSIqr + (mp.Rr / mp.Xlr) * (PSImd - PSIdr))
-    Te  = (3.0 / 2.0) * (mp.p / 2.0) * (1.0 / mp.wb) * (PSIds * iqs - PSIqs * ids)
-    dwr = (mp.p / (2.0 * mp.J)) * (Te - Tl) - (mp.B / mp.J) * wr
+    Te  = (3.0/2.0) * (mp.p/2.0) * (1.0/mp.wb) * (PSIds * iqs - PSIqs * ids)
+    dwr = (mp.p / (2.0*mp.J)) * (Te - Tl) - (mp.B/mp.J) * wr
     return [dPSIqs, dPSIds, dPSIqr, dPSIdr, dwr]
 
 
 def abc_voltages(t, Vl, f):
     tetae = 2.0 * np.pi * f * t
     Va = np.sqrt(2.0) * Vl * np.sin(tetae)
-    Vb = np.sqrt(2.0) * Vl * np.sin(tetae - 2.0 * np.pi / 3.0)
-    Vc = np.sqrt(2.0) * Vl * np.sin(tetae + 2.0 * np.pi / 3.0)
+    Vb = np.sqrt(2.0) * Vl * np.sin(tetae - 2.0*np.pi/3.0)
+    Vc = np.sqrt(2.0) * Vl * np.sin(tetae + 2.0*np.pi/3.0)
     return Va, Vb, Vc
 
 
 def clarke_park_transform(Va, Vb, Vc, tetae):
-    Valpha = np.sqrt(3.0 / 2.0) * (Va - 0.5 * Vb - 0.5 * Vc)
-    Vbeta  = np.sqrt(3.0 / 2.0) * ((np.sqrt(3.0) / 2.0) * Vb - (np.sqrt(3.0) / 2.0) * Vc)
-    Vds = np.cos(tetae) * Valpha + np.sin(tetae) * Vbeta
-    Vqs = -np.sin(tetae) * Valpha + np.cos(tetae) * Vbeta
+    k = np.sqrt(3.0/2.0)
+    Valpha = k * (Va - 0.5*Vb - 0.5*Vc)
+    Vbeta  = k * ((np.sqrt(3.0)/2.0)*Vb - (np.sqrt(3.0)/2.0)*Vc)
+    Vds = np.cos(tetae)*Valpha + np.sin(tetae)*Vbeta
+    Vqs = -np.sin(tetae)*Valpha + np.cos(tetae)*Vbeta
     return Vds, Vqs
 
 
 def reconstruct_abc_currents(PSIqs, PSIds, PSIqr, PSIdr, tetae, tetar, mp):
-    PSImq = mp.Xml * (PSIqs / mp.Xls + PSIqr / mp.Xlr)
-    PSImd = mp.Xml * (PSIds / mp.Xls + PSIdr / mp.Xlr)
-    ids = (1.0 / mp.Xls) * (PSIds - PSImd)
-    iqs = (1.0 / mp.Xls) * (PSIqs - PSImq)
-    idr = (1.0 / mp.Xlr) * (PSIdr - PSImd)
-    iqr = (1.0 / mp.Xlr) * (PSIqr - PSImq)
-    ias_alpha = np.cos(tetae) * ids - np.sin(tetae) * iqs
-    ias_beta  = np.sin(tetae) * ids + np.cos(tetae) * iqs
-    iar_alpha = np.cos(tetar) * idr - np.sin(tetar) * iqr
-    iar_beta  = np.sin(tetar) * idr + np.cos(tetar) * iqr
-    k = np.sqrt(3.0 / 2.0)
-    ias = k * ias_alpha
-    ibs = k * (-0.5 * ias_alpha + (np.sqrt(3.0) / 2.0) * ias_beta)
-    ics = k * (-0.5 * ias_alpha - (np.sqrt(3.0) / 2.0) * ias_beta)
-    iar = k * iar_alpha
-    ibr = k * (-0.5 * iar_alpha + (np.sqrt(3.0) / 2.0) * iar_beta)
-    icr = k * (-0.5 * iar_alpha - (np.sqrt(3.0) / 2.0) * iar_beta)
+    PSImq = mp.Xml*(PSIqs/mp.Xls + PSIqr/mp.Xlr)
+    PSImd = mp.Xml*(PSIds/mp.Xls + PSIdr/mp.Xlr)
+    ids = (1.0/mp.Xls)*(PSIds - PSImd)
+    iqs = (1.0/mp.Xls)*(PSIqs - PSImq)
+    idr = (1.0/mp.Xlr)*(PSIdr - PSImd)
+    iqr = (1.0/mp.Xlr)*(PSIqr - PSImq)
+    ias_alpha = np.cos(tetae)*ids - np.sin(tetae)*iqs
+    ias_beta  = np.sin(tetae)*ids + np.cos(tetae)*iqs
+    iar_alpha = np.cos(tetar)*idr - np.sin(tetar)*iqr
+    iar_beta  = np.sin(tetar)*idr + np.cos(tetar)*iqr
+    k = np.sqrt(3.0/2.0)
+    ias = k*ias_alpha
+    ibs = k*(-0.5*ias_alpha + (np.sqrt(3.0)/2.0)*ias_beta)
+    ics = k*(-0.5*ias_alpha - (np.sqrt(3.0)/2.0)*ias_beta)
+    iar = k*iar_alpha
+    ibr = k*(-0.5*iar_alpha + (np.sqrt(3.0)/2.0)*iar_beta)
+    icr = k*(-0.5*iar_alpha - (np.sqrt(3.0)/2.0)*iar_beta)
     return ids, iqs, idr, iqr, ias, ibs, ics, iar, ibr, icr
 
 
@@ -123,7 +121,7 @@ def voltage_soft_starter(t, Vl_nominal, Vl_initial, t_start_ramp, t_full):
     if t < t_start_ramp:
         return Vl_initial
     elif t < t_full:
-        return Vl_initial + (Vl_nominal - Vl_initial) * (t - t_start_ramp) / (t_full - t_start_ramp)
+        return Vl_initial + (Vl_nominal - Vl_initial)*(t - t_start_ramp)/(t_full - t_start_ramp)
     return Vl_nominal
 
 
@@ -134,548 +132,561 @@ def torque_step(t, Tl_before, Tl_after, t_switch):
 def run_simulation(mp, tmax, h, voltage_fn, torque_fn, ref_code=1):
     t_values = np.arange(0.0, tmax, h)
     N = len(t_values)
-    wr_r  = np.empty(N); n_r   = np.empty(N); Te_r  = np.empty(N)
-    ids_r = np.empty(N); iqs_r = np.empty(N)
-    idr_r = np.empty(N); iqr_r = np.empty(N)
-    ias_r = np.empty(N); ibs_r = np.empty(N); ics_r = np.empty(N)
-    iar_r = np.empty(N); ibr_r = np.empty(N); icr_r = np.empty(N)
-    Va_r  = np.empty(N); Vb_r  = np.empty(N); Vc_r  = np.empty(N)
-    Vds_r = np.empty(N); Vqs_r = np.empty(N)
-
-    states  = [0.0, 0.0, 0.0, 0.0, 0.0]
-    last_wr = 0.0
-    we = mp.wb
-
+    arrays = {k: np.empty(N) for k in [
+        "wr","n","Te","ids","iqs","idr","iqr",
+        "ias","ibs","ics","iar","ibr","icr","Va","Vb","Vc","Vds","Vqs"
+    ]}
+    states, last_wr, we = [0.0]*5, 0.0, mp.wb
     for i, t_val in enumerate(t_values):
         Vl_apli    = voltage_fn(t_val)
         current_Tl = torque_fn(t_val)
         tetae = we * t_val
-        if ref_code == 1:
-            w_ref = we
-        elif ref_code == 2:
-            w_ref = last_wr
-        else:
-            w_ref = 0.0
-
+        w_ref = we if ref_code == 1 else (last_wr if ref_code == 2 else 0.0)
         Va, Vb, Vc = abc_voltages(t_val, Vl_apli, mp.f)
         Vds, Vqs   = clarke_park_transform(Va, Vb, Vc, tetae)
-
-        sol    = odeint(induction_motor_ode, states, [t_val, t_val + h],
+        sol    = odeint(induction_motor_ode, states, [t_val, t_val+h],
                         args=(Vqs, Vds, current_Tl, w_ref, mp))
         states = list(sol[1])
         PSIqs, PSIds, PSIqr, PSIdr, wr = states
-        last_wr = wr
+        last_wr  = wr
         tetar_abc = wr * t_val
-
         ids, iqs, idr, iqr, ias, ibs, ics, iar, ibr, icr = reconstruct_abc_currents(
             PSIqs, PSIds, PSIqr, PSIdr, tetae, tetar_abc, mp)
-
-        Te = (3.0 / 2.0) * (mp.p / 2.0) * (1.0 / mp.wb) * (PSIds * iqs - PSIqs * ids)
-
-        wr_r[i]  = wr;  n_r[i]   = (120.0 / mp.p) * (wr / (2.0 * np.pi))
-        Te_r[i]  = Te
-        ids_r[i] = ids; iqs_r[i] = iqs; idr_r[i] = idr; iqr_r[i] = iqr
-        ias_r[i] = ias; ibs_r[i] = ibs; ics_r[i] = ics
-        iar_r[i] = iar; ibr_r[i] = ibr; icr_r[i] = icr
-        Va_r[i]  = Va;  Vb_r[i]  = Vb;  Vc_r[i]  = Vc
-        Vds_r[i] = Vds; Vqs_r[i] = Vqs
-
-    return {
-        "t": t_values, "wr": wr_r, "n": n_r, "Te": Te_r,
-        "ids": ids_r, "iqs": iqs_r, "idr": idr_r, "iqr": iqr_r,
-        "ias": ias_r, "ibs": ibs_r, "ics": ics_r,
-        "iar": iar_r, "ibr": ibr_r, "icr": icr_r,
-        "Va": Va_r, "Vb": Vb_r, "Vc": Vc_r,
-        "Vds": Vds_r, "Vqs": Vqs_r,
-    }
+        Te = (3.0/2.0)*(mp.p/2.0)*(1.0/mp.wb)*(PSIds*iqs - PSIqs*ids)
+        arrays["wr"][i]  = wr
+        arrays["n"][i]   = (120.0/mp.p)*(wr/(2.0*np.pi))
+        arrays["Te"][i]  = Te
+        arrays["ids"][i] = ids; arrays["iqs"][i] = iqs
+        arrays["idr"][i] = idr; arrays["iqr"][i] = iqr
+        arrays["ias"][i] = ias; arrays["ibs"][i] = ibs; arrays["ics"][i] = ics
+        arrays["iar"][i] = iar; arrays["ibr"][i] = ibr; arrays["icr"][i] = icr
+        arrays["Va"][i]  = Va;  arrays["Vb"][i]  = Vb;  arrays["Vc"][i]  = Vc
+        arrays["Vds"][i] = Vds; arrays["Vqs"][i] = Vqs
+    arrays["t"] = t_values
+    return arrays
 
 
-# =============================================================================
-# SECAO 2 — TEMA E ESTILOS CSS
-# =============================================================================
-
-def apply_theme(dark_mode: bool) -> None:
-    """Injeta CSS para alternar entre tema claro e escuro."""
-    if dark_mode:
-        bg        = "#0e1117"
-        bg2       = "#1a1d27"
-        text      = "#e8eaf0"
-        text_muted= "#9aa0b4"
-        border    = "#2e3250"
-        accent    = "#4f8ef7"
-        card_bg   = "#161b2e"
-        input_bg  = "#1e2333"
-        label_col = "#c5cae9"
+def build_voltage_and_torque_fns(config: dict, mp: MachineParams):
+    exp = config["exp_type"]
+    t_events = []
+    if exp == "dol":
+        Tl = config["Tl_final"]
+        tc = config["t_carga"]
+        vfn = lambda t: mp.Vl
+        tfn = lambda t: torque_step(t, 0.0, Tl, tc)
+        t_events = [tc]
+    elif exp == "yd":
+        Vl_Y = mp.Vl / np.sqrt(3.0)
+        Tl   = config["Tl_final"]
+        t2   = config["t_2"]
+        tc   = config["t_carga"]
+        vfn  = lambda t: voltage_reduced_start(t, mp.Vl, Vl_Y, t2)
+        tfn  = lambda t: torque_step(t, 0.0, Tl, tc)
+        t_events = [t2, tc]
+    elif exp == "comp":
+        Vl_red = mp.Vl * config["voltage_ratio"]
+        Tl     = config["Tl_final"]
+        t2     = config["t_2"]
+        tc     = config["t_carga"]
+        vfn    = lambda t: voltage_reduced_start(t, mp.Vl, Vl_red, t2)
+        tfn    = lambda t: torque_step(t, 0.0, Tl, tc)
+        t_events = [t2, tc]
+    elif exp == "soft":
+        Vl_init = mp.Vl * config["voltage_ratio"]
+        t2      = config["t_2"]
+        tp      = config["t_pico"]
+        Tl      = config["Tl_final"]
+        tc      = config["t_carga"]
+        vfn = lambda t: voltage_soft_starter(t, mp.Vl, Vl_init, t2, tp)
+        tfn = lambda t: torque_step(t, 0.0, Tl, tc)
+        t_events = [t2, tp, tc]
+    elif exp == "carga":
+        Tl = config["Tl_final"]
+        tc = config["t_carga"]
+        vfn = lambda t: mp.Vl
+        tfn = lambda t: torque_step(t, 0.0, Tl, tc)
+        t_events = [tc]
+    elif exp == "gerador":
+        Tl_neg = -config["Tl_mec"]
+        vfn = lambda t: mp.Vl
+        tfn = lambda t: Tl_neg
+        t_events = [config["t_2"]]
     else:
-        bg        = "#f4f6fb"
-        bg2       = "#ffffff"
-        text      = "#1a1d2e"
-        text_muted= "#5c6380"
-        border    = "#d0d5e8"
-        accent    = "#1a56db"
-        card_bg   = "#ffffff"
-        input_bg  = "#f0f4ff"
-        label_col = "#334155"
+        vfn = lambda t: mp.Vl
+        tfn = lambda t: 0.0
+    return vfn, tfn, t_events
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCO B — TEMA E CSS
+# ═════════════════════════════════════════════════════════════════════════════
+
+PALETTE = {
+    "dark": {
+        "bg":         "#0d1117",
+        "surface":    "#161b27",
+        "surface2":   "#1e2538",
+        "border":     "#2a3150",
+        "accent":     "#4f8ef7",
+        "accent2":    "#7c6af7",
+        "text":       "#e4e8f5",
+        "text_muted": "#8892b0",
+        "success":    "#22c55e",
+        "danger":     "#ef4444",
+        "warn_bg":    "rgba(239,68,68,0.08)",
+        "input_bg":   "#1a2035",
+        "tag_bg":     "#1e2d4a",
+    },
+    "light": {
+        "bg":         "#f0f4ff",
+        "surface":    "#ffffff",
+        "surface2":   "#eef2ff",
+        "border":     "#cbd5f0",
+        "accent":     "#2563eb",
+        "accent2":    "#7c3aed",
+        "text":       "#111827",
+        "text_muted": "#4b5563",
+        "success":    "#16a34a",
+        "danger":     "#dc2626",
+        "warn_bg":    "rgba(220,38,38,0.06)",
+        "input_bg":   "#eef2ff",
+        "tag_bg":     "#dbeafe",
+    },
+}
+
+
+def get_palette() -> dict:
+    return PALETTE["dark"] if st.session_state.get("dark_mode", True) else PALETTE["light"]
+
+
+def apply_css() -> None:
+    c = get_palette()
     st.markdown(f"""
     <style>
-      /* ---- base ---- */
-      html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
-        background-color: {bg};
-        color: {text};
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+      html, body,
+      [data-testid="stAppViewContainer"],
+      [data-testid="stMain"],
+      [data-testid="block-container"] {{
+        background-color: {c["bg"]} !important;
+        color: {c["text"]};
         font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
       }}
-      /* sidebar */
-      [data-testid="stSidebar"] {{
-        background-color: {bg2};
-        border-right: 1px solid {border};
+
+      /* oculta sidebar completamente */
+      [data-testid="stSidebar"],
+      [data-testid="collapsedControl"] {{
+        display: none !important;
       }}
-      [data-testid="stSidebar"] * {{
-        color: {text} !important;
+
+      /* cabecalho da pagina */
+      .app-header {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 1.2rem 0 1rem 0;
+        border-bottom: 1px solid {c["border"]};
+        margin-bottom: 2rem;
       }}
-      /* inputs */
-      input, textarea, select {{
-        background-color: {input_bg} !important;
-        color: {text} !important;
-        border: 1px solid {border} !important;
-        border-radius: 6px !important;
-      }}
-      /* slider track */
-      [data-testid="stSlider"] > div > div > div {{
-        background: {accent} !important;
-      }}
-      /* headings */
-      h1 {{ font-size: 2rem; font-weight: 700; color: {text}; margin-bottom: 0.2rem; }}
-      h2 {{ font-size: 1.5rem; font-weight: 600; color: {text}; }}
-      h3 {{ font-size: 1.2rem; font-weight: 600; color: {text}; }}
-      /* labels */
-      label, .stTextInput label, .stNumberInput label,
-      .stSelectbox label, .stSlider label {{
-        font-size: 0.95rem !important;
-        font-weight: 500 !important;
-        color: {label_col} !important;
-      }}
-      /* section card */
-      .param-card {{
-        background: {card_bg};
-        border: 1px solid {border};
-        border-radius: 12px;
-        padding: 1.2rem 1.4rem;
-        margin-bottom: 1.2rem;
-      }}
-      .section-title {{
-        font-size: 1.05rem;
+      .app-title {{
+        font-size: 1.35rem;
         font-weight: 700;
-        color: {accent};
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        margin-bottom: 0.8rem;
-        border-bottom: 2px solid {border};
-        padding-bottom: 0.4rem;
+        color: {c["text"]};
+        letter-spacing: -0.02em;
       }}
-      /* info box */
-      .info-box {{
-        background: {input_bg};
-        border-left: 4px solid {accent};
-        border-radius: 6px;
-        padding: 0.8rem 1rem;
-        font-size: 0.9rem;
-        color: {text_muted};
+      .app-subtitle {{
+        font-size: 0.82rem;
+        color: {c["text_muted"]};
+        margin-top: 0.1rem;
+      }}
+
+      /* cartoes de maquina */
+      .machine-grid {{
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1.2rem;
+        margin-top: 1.5rem;
+        margin-bottom: 2rem;
+      }}
+      .machine-card {{
+        background: {c["surface"]};
+        border: 2px solid {c["border"]};
+        border-radius: 14px;
+        padding: 1.8rem 1.2rem;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color 0.2s, box-shadow 0.2s;
+      }}
+      .machine-card:hover {{
+        border-color: {c["accent"]};
+        box-shadow: 0 0 0 3px {c["accent"]}22;
+      }}
+      .machine-card.active {{
+        border-color: {c["accent"]};
+        background: {c["tag_bg"]};
+        box-shadow: 0 0 0 3px {c["accent"]}33;
+      }}
+      .machine-card.disabled {{
+        opacity: 0.38;
+        cursor: not-allowed;
+        pointer-events: none;
+      }}
+      .machine-card .card-icon {{
+        font-size: 2.4rem;
+        margin-bottom: 0.6rem;
+        display: block;
+        filter: grayscale(0.2);
+      }}
+      .machine-card .card-name {{
+        font-size: 1rem;
+        font-weight: 700;
+        color: {c["text"]};
+      }}
+      .machine-card .card-tag {{
+        display: inline-block;
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        background: {c["tag_bg"]};
+        color: {c["accent"]};
+        border-radius: 4px;
+        padding: 0.15rem 0.5rem;
         margin-top: 0.5rem;
       }}
-      /* placeholder image */
-      .img-placeholder {{
-        background: {input_bg};
-        border: 2px dashed {border};
-        border-radius: 10px;
-        padding: 2.5rem 1rem;
-        text-align: center;
-        color: {text_muted};
-        font-size: 0.95rem;
+      .machine-card .card-tag.soon {{
+        background: {c["surface2"]};
+        color: {c["text_muted"]};
+      }}
+
+      /* secao de titulo */
+      .section-label {{
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: {c["accent"]};
+        margin-bottom: 0.5rem;
+      }}
+      .section-divider {{
+        border: none;
+        border-top: 1px solid {c["border"]};
+        margin: 1.4rem 0;
+      }}
+
+      /* card de parametros */
+      .param-group {{
+        background: {c["surface"]};
+        border: 1px solid {c["border"]};
+        border-radius: 12px;
+        padding: 1.2rem 1.4rem 1rem 1.4rem;
         margin-bottom: 1rem;
       }}
-      /* steady state table */
-      .ss-table td, .ss-table th {{
-        padding: 0.4rem 0.8rem;
-        border-bottom: 1px solid {border};
-        font-size: 0.95rem;
+      .param-group-title {{
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: {c["accent"]};
+        margin-bottom: 0.9rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid {c["border"]};
       }}
-      .ss-table th {{ color: {accent}; font-weight: 600; }}
-      /* learning card */
-      .learn-card {{
-        background: {card_bg};
-        border: 1px solid {border};
+
+      /* info box */
+      .info-box {{
+        background: {c["input_bg"]};
+        border-left: 3px solid {c["accent"]};
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        font-size: 0.875rem;
+        color: {c["text_muted"]};
+        line-height: 1.6;
+        margin: 0.6rem 0;
+      }}
+
+      /* KPI metrics override */
+      [data-testid="stMetric"] {{
+        background: {c["surface"]};
+        border: 1px solid {c["border"]};
+        border-radius: 10px;
+        padding: 0.9rem 1.1rem;
+      }}
+      [data-testid="stMetricLabel"] {{
+        font-size: 0.78rem !important;
+        color: {c["text_muted"]} !important;
+        font-weight: 500 !important;
+      }}
+      [data-testid="stMetricValue"] {{
+        font-size: 1.5rem !important;
+        font-weight: 700 !important;
+        color: {c["text"]} !important;
+      }}
+
+      /* abas */
+      [data-baseweb="tab-list"] {{
+        background: {c["surface"]} !important;
+        border-radius: 10px !important;
+        padding: 0.25rem !important;
+        border: 1px solid {c["border"]} !important;
+        gap: 0.2rem !important;
+      }}
+      [data-baseweb="tab"] {{
+        font-size: 0.9rem !important;
+        font-weight: 600 !important;
+        color: {c["text_muted"]} !important;
+        border-radius: 7px !important;
+        padding: 0.45rem 1.1rem !important;
+      }}
+      [aria-selected="true"][data-baseweb="tab"] {{
+        background: {c["accent"]} !important;
+        color: #ffffff !important;
+      }}
+
+      /* inputs */
+      input[type="number"], select, textarea {{
+        background: {c["input_bg"]} !important;
+        color: {c["text"]} !important;
+        border: 1px solid {c["border"]} !important;
+        border-radius: 7px !important;
+        font-size: 0.95rem !important;
+      }}
+      label {{
+        font-size: 0.88rem !important;
+        font-weight: 500 !important;
+        color: {c["text_muted"]} !important;
+      }}
+
+      /* botao principal */
+      .run-btn-wrap {{
+        display: flex;
+        justify-content: center;
+        margin: 1.5rem 0 0.5rem 0;
+      }}
+      .stButton > button {{
+        background: {c["accent"]} !important;
+        color: #fff !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-weight: 700 !important;
+        font-size: 1rem !important;
+        padding: 0.65rem 2.5rem !important;
+        letter-spacing: 0.02em;
+        transition: opacity 0.15s;
+      }}
+      .stButton > button:hover {{ opacity: 0.87 !important; }}
+
+      /* teoria cards */
+      .theory-card {{
+        background: {c["surface"]};
+        border: 1px solid {c["border"]};
+        border-left: 4px solid {c["accent2"]};
         border-radius: 10px;
         padding: 1.2rem 1.5rem;
         margin-bottom: 1rem;
       }}
-      .learn-card h4 {{
-        color: {accent};
+      .theory-card h4 {{
         font-size: 1rem;
         font-weight: 700;
-        margin-bottom: 0.5rem;
+        color: {c["text"]};
+        margin: 0 0 0.5rem 0;
       }}
-      .learn-card p {{ font-size: 0.95rem; line-height: 1.7; color: {text}; }}
-      .learn-card .up {{ color: #22c55e; font-weight: 600; }}
-      .learn-card .down {{ color: #ef4444; font-weight: 600; }}
-      .learn-card .warn {{
-        background: rgba(239,68,68,0.1);
-        border-left: 3px solid #ef4444;
+      .theory-card p {{
+        font-size: 0.92rem;
+        line-height: 1.75;
+        color: {c["text_muted"]};
+        margin: 0.3rem 0;
+      }}
+      .tc-up   {{ color: {c["success"]}; font-weight: 600; }}
+      .tc-down {{ color: {c["danger"]};  font-weight: 600; }}
+      .tc-warn {{
+        background: {c["warn_bg"]};
+        border-left: 3px solid {c["danger"]};
+        border-radius: 5px;
         padding: 0.5rem 0.8rem;
-        border-radius: 4px;
-        font-size: 0.88rem;
-        color: #ef4444;
-        margin-top: 0.6rem;
+        margin-top: 0.7rem;
+        font-size: 0.85rem;
+        color: {c["danger"]};
+        line-height: 1.5;
       }}
-      /* tab styling */
-      [data-baseweb="tab"] {{
-        font-size: 1rem;
-        font-weight: 600;
+
+      /* circuito placeholder */
+      .circuit-placeholder {{
+        background: {c["surface2"]};
+        border: 2px dashed {c["border"]};
+        border-radius: 12px;
+        padding: 3rem 2rem;
+        text-align: center;
+        color: {c["text_muted"]};
+        font-size: 0.92rem;
+        line-height: 1.7;
       }}
-      /* number input arrows */
-      [data-testid="stNumberInput"] input {{ font-size: 1rem !important; }}
-      /* button */
-      .stButton > button {{
-        background: {accent};
-        color: white;
-        border: none;
-        border-radius: 8px;
-        font-weight: 600;
-        font-size: 1rem;
-        padding: 0.55rem 1.6rem;
-        cursor: pointer;
-        transition: opacity 0.2s;
-      }}
-      .stButton > button:hover {{ opacity: 0.88; }}
+
+      /* headings */
+      h1 {{ font-size: 1.9rem; font-weight: 700; color: {c["text"]}; }}
+      h2 {{ font-size: 1.35rem; font-weight: 600; color: {c["text"]}; margin-top: 1.5rem; }}
+      h3 {{ font-size: 1.1rem; font-weight: 600; color: {c["text"]}; }}
     </style>
     """, unsafe_allow_html=True)
 
 
-# =============================================================================
-# SECAO 3 — COMPONENTES DE LAYOUT
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCO C — TELA DE SELECAO DE MAQUINA
+# ═════════════════════════════════════════════════════════════════════════════
 
-def card(title: str, content_fn):
-    """Envolve um bloco de conteudo num card visual."""
-    st.markdown(f'<div class="param-card"><div class="section-title">{title}</div>', unsafe_allow_html=True)
-    content_fn()
-    st.markdown('</div>', unsafe_allow_html=True)
+MACHINES = [
+    {"key": "mit",  "name": "Motor de Inducao Trifasico", "icon": "M", "tag": "Disponivel", "disabled": False},
+    {"key": "sync", "name": "Gerador Sincrono",            "icon": "G", "tag": "Em breve",   "disabled": True},
+    {"key": "dc",   "name": "Motor de Corrente Continua", "icon": "D", "tag": "Em breve",   "disabled": True},
+    {"key": "tr",   "name": "Transformador",               "icon": "T", "tag": "Em breve",   "disabled": True},
+]
 
 
-def info_box(text: str):
+def render_machine_selector() -> None:
+    c = get_palette()
+
+    st.markdown(
+        '<p class="section-label">Selecao de Equipamento</p>'
+        '<h2 style="margin-top:0">Escolha a maquina para simular</h2>',
+        unsafe_allow_html=True,
+    )
+
+    cols = st.columns(4, gap="medium")
+    for i, m in enumerate(MACHINES):
+        with cols[i]:
+            is_active  = st.session_state.get("selected_machine") == m["key"]
+            is_disabled = m["disabled"]
+            card_class = "machine-card"
+            if is_active:    card_class += " active"
+            if is_disabled:  card_class += " disabled"
+
+            tag_class = "card-tag" + (" soon" if is_disabled else "")
+
+            st.markdown(
+                f'<div class="{card_class}">'
+                f'<span class="card-icon" style="font-family:monospace;font-weight:900;'
+                f'font-size:2rem;color:{c["accent"]}">{m["icon"]}</span>'
+                f'<div class="card-name">{m["name"]}</div>'
+                f'<span class="{tag_class}">{m["tag"]}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            if not is_disabled:
+                if st.button("Selecionar", key=f"btn_{m['key']}", use_container_width=True):
+                    st.session_state["selected_machine"] = m["key"]
+                    st.rerun()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCO D — ABA SIMULACAO
+# ═════════════════════════════════════════════════════════════════════════════
+
+VARIABLE_CATALOG = {
+    "Torque eletromagnetico  Te  (N.m)":       "Te",
+    "Velocidade do rotor  n  (RPM)":            "n",
+    "Velocidade angular  wr  (rad/s)":          "wr",
+    "Corrente de fase A — estator  ias  (A)":   "ias",
+    "Corrente de fase B — estator  ibs  (A)":   "ibs",
+    "Corrente de fase C — estator  ics  (A)":   "ics",
+    "Corrente de fase A — rotor  iar  (A)":     "iar",
+    "Corrente de fase B — rotor  ibr  (A)":     "ibr",
+    "Corrente de fase C — rotor  icr  (A)":     "icr",
+    "Componente  ids  (A)":                     "ids",
+    "Componente  iqs  (A)":                     "iqs",
+    "Componente  idr  (A)":                     "idr",
+    "Componente  iqr  (A)":                     "iqr",
+    "Tensao de fase  Va  (V)":                  "Va",
+    "Tensao de fase  Vb  (V)":                  "Vb",
+    "Tensao de fase  Vc  (V)":                  "Vc",
+    "Tensao dq  Vds  (V)":                      "Vds",
+    "Tensao dq  Vqs  (V)":                      "Vqs",
+}
+
+
+def _param_group(title: str) -> None:
+    st.markdown(f'<div class="param-group-title">{title}</div>', unsafe_allow_html=True)
+
+
+def _info(text: str) -> None:
     st.markdown(f'<div class="info-box">{text}</div>', unsafe_allow_html=True)
 
 
-def image_placeholder(label: str):
-    st.markdown(
-        f'<div class="img-placeholder">'
-        f'Espaco reservado para imagem<br><strong>{label}</strong><br>'
-        f'Faca o upload do arquivo abaixo</div>',
-        unsafe_allow_html=True,
-    )
-    uploaded = st.file_uploader(f"Upload — {label}", type=["png", "jpg", "jpeg", "svg"],
-                                 key=f"upload_{label[:20]}", label_visibility="collapsed")
-    if uploaded:
-        st.image(uploaded, use_container_width=True)
-
-
-def render_equivalent_circuit(Rs: float, Xls: float, Xm: float, Xlr: float, Rr: float, dark: bool) -> None:
+def render_tab_simulacao() -> tuple:
     """
-    Desenha o circuito equivalente monofasico da MIT com Plotly.
-    Topologia: Vs --- Rs --- jXls ---+--- jXlr --- Rr/s ---
-                                     |
-                                    jXm
-                                     |
-                                    GND
+    Renderiza a aba de Simulacao.
+    Retorna (mp, ref_code, exp_config, var_keys, var_labels, tmax, h, dark_plot).
     """
-    bg   = "#0e1117" if dark else "#ffffff"
-    fg   = "#e8eaf0" if dark else "#1a1d2e"
-    wire = "#4f8ef7" if dark else "#1a56db"
-    comp = "#f97316"  # cor dos componentes
-    lw   = 2.5
+    # ── controles globais no topo ────────────────────────────────────────────
+    col_toggle, col_plot, _ = st.columns([1, 1, 3])
+    with col_toggle:
+        st.toggle("Modo Escuro", value=True, key="dark_mode")
+    with col_plot:
+        dark_plot = st.toggle("Fundo escuro no grafico", value=True, key="plot_dark")
 
-    fig = go.Figure()
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-    def line(x0, y0, x1, y1, color=wire, width=lw, dash="solid"):
-        fig.add_shape(type="line", x0=x0, y0=y0, x1=x1, y1=y1,
-                      line=dict(color=color, width=width, dash=dash))
+    # ── PARAMETROS DA MAQUINA ────────────────────────────────────────────────
+    st.markdown('<p class="section-label">Parametros Fisicos da Maquina</p>', unsafe_allow_html=True)
 
-    def label(x, y, text, size=11, color=fg, anchor="center"):
-        fig.add_annotation(x=x, y=y, text=text, showarrow=False,
-                           font=dict(size=size, color=color, family="Inter, monospace"),
-                           xanchor=anchor, yanchor="middle")
+    col_e, col_m = st.columns(2, gap="large")
 
-    def resistor(x0, y, width=1.0, label_text="", val_text=""):
-        """Resistor horizontal: linha ziguezague simplificada (retangulo estreito)."""
-        n_teeth = 5
-        seg = width / (n_teeth * 2)
-        xs = [x0]
-        ys = [y]
-        xs.append(x0 + seg)
-        ys.append(y)
-        for i in range(n_teeth):
-            xs += [x0 + seg + i * 2 * seg + seg, x0 + seg + i * 2 * seg + 2 * seg]
-            ys += [y + 0.18, y - 0.18]
-        xs.append(x0 + width - seg)
-        ys.append(y)
-        xs.append(x0 + width)
-        ys.append(y)
-        fig.add_trace(go.Scatter(
-            x=xs, y=ys, mode="lines",
-            line=dict(color=comp, width=lw),
-            showlegend=False, hoverinfo="skip",
-        ))
-        label(x0 + width / 2, y + 0.35, label_text, size=10, color=comp)
-        label(x0 + width / 2, y - 0.35, val_text, size=9, color=fg)
+    with col_e:
+        st.markdown('<div class="param-group">', unsafe_allow_html=True)
+        _param_group("Dados Eletricos")
+        Vl  = st.number_input("Tensao de linha RMS — Vl (V)",       min_value=50.0,  max_value=15000.0, value=220.0,  step=1.0)
+        f   = st.number_input("Frequencia da rede — f (Hz)",         min_value=1.0,   max_value=400.0,   value=60.0,   step=1.0)
+        Rs  = st.number_input("Resistencia do estator — Rs (Ohm)",   min_value=0.001, max_value=100.0,   value=0.435,  step=0.001, format="%.3f")
+        Rr  = st.number_input("Resistencia do rotor — Rr (Ohm)",     min_value=0.001, max_value=100.0,   value=0.816,  step=0.001, format="%.3f")
+        Xm  = st.number_input("Reatancia de magnetizacao — Xm (Ohm)",min_value=0.1,   max_value=500.0,   value=26.13,  step=0.01,  format="%.2f")
+        Xls = st.number_input("Reatancia de dispersao estator — Xls (Ohm)", min_value=0.001, max_value=50.0, value=0.754, step=0.001, format="%.3f")
+        Xlr = st.number_input("Reatancia de dispersao rotor — Xlr (Ohm)",   min_value=0.001, max_value=50.0, value=0.754, step=0.001, format="%.3f")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    def inductor(x0, y, width=1.0, label_text="", val_text=""):
-        """Indutor horizontal: arcos semicirculares."""
-        n_arcs = 4
-        arc_w  = width / n_arcs
-        t      = np.linspace(0, np.pi, 20)
-        xs_all, ys_all = [], []
-        for i in range(n_arcs):
-            cx = x0 + i * arc_w + arc_w / 2
-            xs_all += list(cx + (arc_w / 2) * np.cos(t + np.pi))
-            ys_all += list(y  + (arc_w / 2) * 0.8 * np.sin(t))
-            if i < n_arcs - 1:
-                xs_all.append(None)
-                ys_all.append(None)
-        fig.add_trace(go.Scatter(
-            x=xs_all, y=ys_all, mode="lines",
-            line=dict(color=comp, width=lw),
-            showlegend=False, hoverinfo="skip",
-        ))
-        label(x0 + width / 2, y + 0.38, label_text, size=10, color=comp)
-        label(x0 + width / 2, y - 0.35, val_text, size=9, color=fg)
-
-    def inductor_vert(x, y0, height=1.0, label_text="", val_text=""):
-        """Indutor vertical: arcos."""
-        n_arcs = 3
-        arc_h  = height / n_arcs
-        t      = np.linspace(0, np.pi, 20)
-        xs_all, ys_all = [], []
-        for i in range(n_arcs):
-            cy = y0 - i * arc_h - arc_h / 2
-            xs_all += list(x + (arc_h / 2) * 0.8 * np.sin(t))
-            ys_all += list(cy + (arc_h / 2) * np.cos(t + np.pi))
-            if i < n_arcs - 1:
-                xs_all.append(None)
-                ys_all.append(None)
-        fig.add_trace(go.Scatter(
-            x=xs_all, y=ys_all, mode="lines",
-            line=dict(color=comp, width=lw),
-            showlegend=False, hoverinfo="skip",
-        ))
-        label(x + 0.52, y0 - height / 2, label_text, size=10, color=comp, anchor="left")
-        label(x + 0.52, y0 - height / 2 - 0.3, val_text, size=9, color=fg, anchor="left")
-
-    # ---- coordenadas do circuito ----
-    y_top  = 2.0   # fio superior
-    y_bot  = 0.0   # fio inferior (GND)
-    y_mid  = (y_top + y_bot) / 2
-
-    # posicoes horizontais
-    x_vs0  = 0.0   # inicio fonte
-    x_vs1  = 0.5   # fim fonte / inicio Rs
-    x_rs1  = 1.7   # fim Rs
-    x_xls1 = 3.0   # fim Xls
-    x_node = 3.4   # no de juncao (antes do ramo Xm)
-    x_xlr0 = 3.8   # inicio Xlr
-    x_xlr1 = 5.1   # fim Xlr
-    x_rrs0 = 5.5   # inicio Rr/s
-    x_rrs1 = 6.8   # fim Rr/s
-    x_end  = 7.2   # fim do circuito
-
-    # --- fios horizontais superiores ---
-    line(x_vs1,  y_top, x_rs1,  y_top)   # entrada -> Rs (conector)
-    line(x_xls1, y_top, x_node, y_top)   # Xls -> no
-    line(x_node, y_top, x_xlr0, y_top)   # no -> Xlr
-    line(x_xlr1, y_top, x_rrs0, y_top)   # Xlr -> Rr/s
-    line(x_rrs1, y_top, x_end,  y_top)   # Rr/s -> fim
-
-    # --- fio inferior (retorno) ---
-    line(x_vs0, y_bot, x_end, y_bot)
-
-    # --- fonte de tensao (lado esquerdo) ---
-    # circulo da fonte
-    fig.add_shape(type="circle",
-                  x0=x_vs0 - 0.05, y0=y_bot + 0.05,
-                  x1=x_vs0 + 0.05, y1=y_bot + 0.05 + (y_top - y_bot),
-                  line=dict(color=wire, width=lw),
-                  fillcolor=bg)
-    label(x_vs0, y_mid, "Vs", size=11, color=wire)
-    label(x_vs0 - 0.45, y_mid + 0.3, "+", size=13, color=wire)
-    label(x_vs0 - 0.45, y_mid - 0.3, "−", size=13, color=wire)
-
-    # fio da fonte ao primeiro elemento
-    line(x_vs0, y_top, x_vs1, y_top)
-    line(x_vs0, y_bot, x_vs0, y_bot)  # ponto base
-
-    # --- Rs ---
-    resistor(x_vs1, y_top, width=x_rs1 - x_vs1,
-             label_text="Rs",
-             val_text=f"{Rs:.3f} Ω")
-
-    # --- jXls ---
-    inductor(x_rs1, y_top, width=x_xls1 - x_rs1,
-             label_text="jXls",
-             val_text=f"{Xls:.3f} Ω")
-
-    # --- jXm (vertical, no ramo de magnetizacao) ---
-    line(x_node, y_top, x_node, y_top - 0.25)           # fio de descida ate indutor
-    inductor_vert(x_node, y_top - 0.25, height=1.1,
-                  label_text="jXm",
-                  val_text=f"{Xm:.2f} Ω")
-    line(x_node, y_bot + 0.25, x_node, y_bot)           # fio ao GND
-
-    # --- jXlr ---
-    inductor(x_xlr0, y_top, width=x_xlr1 - x_xlr0,
-             label_text="jXlr",
-             val_text=f"{Xlr:.3f} Ω")
-
-    # --- Rr/s (representado como Rr com nota) ---
-    resistor(x_rrs0, y_top, width=x_rrs1 - x_rrs0,
-             label_text="Rr/s",
-             val_text=f"{Rr:.3f} Ω")
-
-    # --- fios verticais de fechamento ---
-    line(x_vs0, y_top, x_vs0, y_top)
-    line(x_end, y_top, x_end, y_bot)   # fechamento direito
-
-    # --- nota de slip ---
-    label(x_rrs0 + (x_rrs1 - x_rrs0) / 2, y_bot - 0.5,
-          "s = escorregamento", size=8, color=fg)
-
-    fig.update_layout(
-        height=260,
-        margin=dict(l=40, r=20, t=10, b=30),
-        paper_bgcolor=bg,
-        plot_bgcolor=bg,
-        xaxis=dict(visible=False, range=[-0.7, 7.6]),
-        yaxis=dict(visible=False, range=[-0.8, 2.7]),
-        showlegend=False,
-        hovermode=False,
-    )
-
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-
-# =============================================================================
-# SECAO 4 — SIDEBAR
-# =============================================================================
-
-def render_sidebar() -> bool:
-    """Renderiza a sidebar e retorna True se modo escuro estiver ativo."""
-    with st.sidebar:
-        st.markdown("## Simulador MIT")
-        st.markdown("Modelo 0dq de Krause — Integracao RK4")
-        st.divider()
-
-        dark_mode = st.toggle("Modo Escuro", value=True, key="dark_mode")
-        st.divider()
-
-        st.markdown("### Sobre")
-        st.markdown(
-            "Simulador didatico da **Maquina de Inducao Trifasica** "
-            "(gaiola de esquilo). Baseado no modelo de Krause no "
-            "referencial arbitrario dq, com integracao numerica por "
-            "Runge-Kutta de 4a ordem (scipy.odeint)."
-        )
-
-    return dark_mode
-
-
-# =============================================================================
-# SECAO 5 — PARAMETROS DA MAQUINA
-# =============================================================================
-
-def render_machine_params() -> MachineParams:
-    """Formulario completo de parametros fisicos da maquina."""
-
-    st.markdown("## Parametros da Maquina")
-
-    col_l, col_r = st.columns(2)
-
-    with col_l:
-        st.markdown('<div class="section-title">Parametros Eletricos</div>', unsafe_allow_html=True)
-
-        Vl  = st.number_input("Tensao de linha RMS — Vl (V)",
-                               min_value=50.0, max_value=15000.0, value=220.0, step=1.0)
-        f   = st.number_input("Frequencia da rede — f (Hz)",
-                               min_value=1.0, max_value=400.0, value=60.0, step=1.0)
-        Rs  = st.number_input("Resistencia do estator — Rs (Ohm)",
-                               min_value=0.001, max_value=100.0, value=0.435, step=0.001, format="%.3f")
-        Rr  = st.number_input("Resistencia do rotor (ref. estator) — Rr (Ohm)",
-                               min_value=0.001, max_value=100.0, value=0.816, step=0.001, format="%.3f")
-        Xm  = st.number_input("Reatancia de magnetizacao — Xm (Ohm)",
-                               min_value=0.1, max_value=500.0, value=26.13, step=0.01, format="%.2f")
-        Xls = st.number_input("Reatancia de dispersao do estator — Xls (Ohm)",
-                               min_value=0.001, max_value=50.0, value=0.754, step=0.001, format="%.3f")
-        Xlr = st.number_input("Reatancia de dispersao do rotor — Xlr (Ohm)",
-                               min_value=0.001, max_value=50.0, value=0.754, step=0.001, format="%.3f")
-
-    with col_r:
-        st.markdown('<div class="section-title">Parametros Mecanicos e Referencial</div>', unsafe_allow_html=True)
-
+    with col_m:
+        st.markdown('<div class="param-group">', unsafe_allow_html=True)
+        _param_group("Dados Mecanicos e Referencial")
         p   = st.selectbox("Numero de polos — p", options=[2, 4, 6, 8, 10, 12], index=1)
-        J   = st.number_input("Momento de inercia — J (kg.m2)",
-                               min_value=0.001, max_value=100.0, value=0.089, step=0.001, format="%.3f")
-        B   = st.number_input("Atrito viscoso — B (N.m.s/rad)",
-                               min_value=0.0, max_value=10.0, value=0.0, step=0.001, format="%.3f")
-
-        ref_code = st.selectbox(
+        J   = st.number_input("Momento de inercia — J (kg.m2)", min_value=0.001, max_value=100.0, value=0.089, step=0.001, format="%.3f")
+        B   = st.number_input("Atrito viscoso — B (N.m.s/rad)",  min_value=0.0,   max_value=10.0,  value=0.0,   step=0.001, format="%.3f")
+        ref_label = st.selectbox(
             "Referencial da Transformada de Park",
-            options=["Sincrono (w_ref = we)", "Rotorico (w_ref = wr)", "Estacionario (w_ref = 0)"],
-            index=0,
+            ["Sincrono  (w_ref = we)", "Rotorico  (w_ref = wr)", "Estacionario  (w_ref = 0)"],
         )
-        ref_map = {"Sincrono (w_ref = we)": 1, "Rotorico (w_ref = wr)": 2, "Estacionario (w_ref = 0)": 3}
-
-        st.markdown("")
-        st.markdown('<div class="section-title">Circuito Equivalente Monofasico</div>', unsafe_allow_html=True)
-        render_equivalent_circuit(
-            Rs=Rs, Xls=Xls, Xm=Xm, Xlr=Xlr, Rr=Rr,
-            dark=st.session_state.get("dark_mode", True),
-        )
+        ref_code = {"Sincrono  (w_ref = we)": 1, "Rotorico  (w_ref = wr)": 2, "Estacionario  (w_ref = 0)": 3}[ref_label]
+        st.markdown('</div>', unsafe_allow_html=True)
 
     mp = MachineParams(Vl=Vl, f=f, Rs=Rs, Rr=Rr, Xm=Xm, Xls=Xls, Xlr=Xlr, p=p, J=J, B=B)
 
-    # Grandezas derivadas como informacao
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Velocidade Sincrona", f"{mp.n_sync:.1f} RPM")
-    col2.metric("Velocidade Angular Base", f"{mp.wb:.2f} rad/s")
-    col3.metric("Reatancia Mutua Equivalente (Xml)", f"{mp.Xml:.4f} Ohm")
+    # grandezas derivadas
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Velocidade Sincrona", f"{mp.n_sync:.1f} RPM")
+    mc2.metric("Velocidade Angular Base", f"{mp.wb:.2f} rad/s")
+    mc3.metric("Reatancia Mutua Xml", f"{mp.Xml:.4f} Ohm")
 
-    return mp, ref_map[ref_code]
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-
-# =============================================================================
-# SECAO 6 — CONFIGURACAO DO EXPERIMENTO
-# =============================================================================
-
-def render_experiment_config(mp: MachineParams):
-    """Selecao do tipo de experimento e parametros de torque/tensao."""
-
-    st.markdown("## Configuracao do Experimento")
+    # ── CONFIGURACAO DO EXPERIMENTO ──────────────────────────────────────────
+    st.markdown('<p class="section-label">Configuracao do Experimento</p>', unsafe_allow_html=True)
 
     exp_options = {
-        "Partida Direta (DOL)": "dol",
-        "Partida Estrela-Triangulo (Y-D)": "yd",
-        "Partida com Autotransformador (Compensadora)": "comp",
-        "Soft-Starter (Rampa de Tensao)": "soft",
-        "Aplicacao de Carga (partida em vazio)": "carga",
-        "Operacao como Gerador": "gerador",
+        "Partida Direta (DOL)":                   "dol",
+        "Partida Estrela-Triangulo (Y-D)":        "yd",
+        "Partida com Autotransformador":           "comp",
+        "Soft-Starter (Rampa de Tensao)":          "soft",
+        "Aplicacao de Carga (partida em vazio)":  "carga",
+        "Operacao como Gerador":                   "gerador",
     }
-
-    exp_label = st.selectbox("Tipo de Experimento", options=list(exp_options.keys()))
+    exp_label = st.selectbox("Tipo de Experimento", list(exp_options.keys()), key="exp_select")
     exp_type  = exp_options[exp_label]
+    config    = {"exp_type": exp_type}
 
-    config = {"exp_type": exp_type}
+    col_exp, col_exp2 = st.columns(2, gap="large")
 
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        st.markdown('<div class="section-title">Parametros de Carga e Tensao</div>', unsafe_allow_html=True)
+    with col_exp:
+        st.markdown('<div class="param-group">', unsafe_allow_html=True)
+        _param_group("Parametros de Carga e Tensao")
 
         if exp_type == "dol":
             config["Tl_final"] = st.number_input("Torque de carga (N.m)", value=80.0, min_value=0.0)
@@ -683,16 +694,16 @@ def render_experiment_config(mp: MachineParams):
 
         elif exp_type == "yd":
             config["Tl_final"] = st.number_input("Torque de carga (N.m)", value=80.0, min_value=0.0)
-            config["t_2"]      = st.number_input("Instante de comutacao Y -> D (s)", value=0.5, min_value=0.01)
+            config["t_2"]      = st.number_input("Instante de comutacao Y para D (s)", value=0.5, min_value=0.01)
             config["t_carga"]  = st.number_input("Instante de aplicacao da carga (s)", value=0.1, min_value=0.0)
-            info_box("A tensao em estrela e reduzida a Vl / raiz(3). A comutacao para triangulo ocorre em t_2.")
+            _info("A tensao em estrela e reduzida a Vl / raiz(3). A comutacao para triangulo ocorre no instante t_2.")
 
         elif exp_type == "comp":
             config["Tl_final"]      = st.number_input("Torque de carga (N.m)", value=80.0, min_value=0.0)
             config["voltage_ratio"] = st.slider("Tap do autotransformador (%)", 10, 95, 50) / 100.0
             config["t_2"]           = st.number_input("Instante de comutacao (s)", value=0.5, min_value=0.01)
             config["t_carga"]       = st.number_input("Instante de aplicacao da carga (s)", value=0.1, min_value=0.0)
-            info_box(f"Tensao inicial = {config['voltage_ratio']*100:.0f}% de Vl nominal.")
+            _info(f"Tensao inicial = {config['voltage_ratio']*100:.0f}% de Vl nominal.")
 
         elif exp_type == "soft":
             config["voltage_ratio"] = st.slider("Tensao inicial do soft-starter (%)", 10, 90, 50) / 100.0
@@ -702,608 +713,647 @@ def render_experiment_config(mp: MachineParams):
             config["t_carga"]       = st.number_input("Instante de aplicacao da carga (s)", value=0.1, min_value=0.0)
 
         elif exp_type == "carga":
-            Tl_nom = st.number_input("Torque nominal de referencia (N.m)", value=80.0, min_value=0.1,
-                                     help="Valor base sobre o qual o percentual e aplicado.")
-            pct    = st.slider("Percentual da carga (%)", min_value=1, max_value=300, value=100,
-                               help="Valores abaixo de 100% simulam carga parcial; acima de 100% simulam sobrecarga.")
+            Tl_nom = st.number_input("Torque nominal de referencia (N.m)", value=80.0, min_value=0.1)
+            pct    = st.slider("Percentual da carga (%)", min_value=1, max_value=300, value=100)
             config["Tl_final"] = Tl_nom * pct / 100.0
             config["t_carga"]  = st.number_input("Instante de aplicacao da carga (s)", value=1.0, min_value=0.0)
-            Tl_calc = config["Tl_final"]
-            regime  = "nominal" if pct == 100 else ("sobrecarga" if pct > 100 else "carga parcial")
-            info_box(
-                f"Torque aplicado: <strong>{Tl_calc:.2f} N.m</strong> "
-                f"({pct}% de {Tl_nom:.1f} N.m) — {regime}"
-            )
+            regime = "nominal" if pct == 100 else ("sobrecarga" if pct > 100 else "carga parcial")
+            _info(f"Torque aplicado: <strong>{config['Tl_final']:.2f} N.m</strong> ({pct}% de {Tl_nom:.1f} N.m) &mdash; {regime}")
 
         elif exp_type == "gerador":
             config["Tl_mec"] = st.number_input("Torque mecanico da turbina (N.m)", value=80.0, min_value=1.0)
             config["t_2"]    = st.number_input("Instante de aplicacao do torque (s)", value=1.0, min_value=0.0)
-            info_box("O torque negativo impulsiona o rotor acima da velocidade sincrona, entrando em modo gerador.")
+            _info("O torque negativo impulsiona o rotor acima da velocidade sincrona, colocando a maquina em modo gerador.")
 
-    with col_b:
-        st.markdown('<div class="section-title">Esquema do Experimento</div>', unsafe_allow_html=True)
-        image_placeholder(f"Diagrama — {exp_label}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    return config
+    with col_exp2:
+        st.markdown('<div class="param-group">', unsafe_allow_html=True)
+        _param_group("Grandezas para Visualizacao")
+        selected_labels = st.multiselect(
+            "Selecione as grandezas a plotar",
+            options=list(VARIABLE_CATALOG.keys()),
+            default=[
+                "Torque eletromagnetico  Te  (N.m)",
+                "Velocidade do rotor  n  (RPM)",
+                "Corrente de fase A — estator  ias  (A)",
+            ],
+        )
+        var_keys   = [VARIABLE_CATALOG[v] for v in selected_labels]
+        var_labels = selected_labels
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+
+    # ── TEMPO E PASSO ────────────────────────────────────────────────────────
+    st.markdown('<p class="section-label">Parametros Numericos da Simulacao</p>', unsafe_allow_html=True)
+
+    col_t, col_ti = st.columns([1, 1], gap="large")
+    with col_t:
+        st.markdown('<div class="param-group">', unsafe_allow_html=True)
+        _param_group("Tempo e Passo de Integracao")
+        tmax = st.number_input("Tempo total de simulacao — tmax (s)", min_value=0.1, max_value=60.0, value=2.0, step=0.1, format="%.1f")
+        h    = st.number_input("Passo de integracao — h (s)", min_value=0.00001, max_value=0.01, value=0.001, step=0.0001, format="%.5f")
+        n_steps = int(tmax / h)
+        st.caption(f"Total de passos: {n_steps:,}")
+        if n_steps > 100_000:
+            st.warning("Volume elevado de passos. A simulacao pode levar varios segundos.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_ti:
+        _info(
+            "<strong>Trade-off tempo x precisao:</strong><br><br>"
+            "<strong>tmax:</strong> quanto maior, mais do transitorio e capturado, mas maior o custo "
+            "computacional.<br><br>"
+            "<strong>h (passo):</strong> valores acima de 0,005 s podem causar instabilidade numerica e "
+            "resultados incorretos. Valores abaixo de 0,0001 s raramente trazem ganho de precisao perceptivel "
+            "e aumentam muito o tempo de processamento. O padrao de 0,001 s equilibra estabilidade e velocidade "
+            "para a maioria dos experimentos com a MIT."
+        )
+
+    # ── BOTAO ────────────────────────────────────────────────────────────────
+    st.markdown('<div class="run-btn-wrap">', unsafe_allow_html=True)
+    run = st.button("Executar Simulacao", key="btn_run", use_container_width=False)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    return mp, ref_code, config, var_keys, var_labels, tmax, h, dark_plot, run
 
 
-# =============================================================================
-# SECAO 7 — SELECAO DE VARIAVEIS PARA PLOTAGEM
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCO E — ABA CIRCUITO EQUIVALENTE
+# ═════════════════════════════════════════════════════════════════════════════
 
-VARIABLE_CATALOG = {
-    "Torque Eletromagnetico Te (N.m)": "Te",
-    "Velocidade do Rotor n (RPM)": "n",
-    "Velocidade Angular wr (rad/s)": "wr",
-    "Corrente de Fase A — Estator ias (A)": "ias",
-    "Corrente de Fase B — Estator ibs (A)": "ibs",
-    "Corrente de Fase C — Estator ics (A)": "ics",
-    "Corrente de Fase A — Rotor iar (A)": "iar",
-    "Corrente de Fase B — Rotor ibr (A)": "ibr",
-    "Corrente de Fase C — Rotor icr (A)": "icr",
-    "Componente dq — ids (A)": "ids",
-    "Componente dq — iqs (A)": "iqs",
-    "Componente dq — idr (A)": "idr",
-    "Componente dq — iqr (A)": "iqr",
-    "Tensao de Fase Va (V)": "Va",
-    "Tensao de Fase Vb (V)": "Vb",
-    "Tensao de Fase Vc (V)": "Vc",
-    "Tensao dq — Vds (V)": "Vds",
-    "Tensao dq — Vqs (V)": "Vqs",
-}
+def _resistor_pts(x0: float, y: float, w: float, n: int = 6):
+    """Gera pontos do simbolo de resistor em ziguezague."""
+    seg = w / (2 * n + 2)
+    xs, ys = [x0, x0 + seg], [y, y]
+    for i in range(n):
+        xs += [x0 + seg + (2*i+1)*seg, x0 + seg + (2*i+2)*seg]
+        ys += [y + 0.16, y - 0.16]
+    xs += [x0 + w - seg, x0 + w]
+    ys += [y, y]
+    return xs, ys
 
-def render_variable_selector():
-    """Permite ao usuario escolher quais grandezas serao plotadas."""
-    st.markdown("## Variaveis para Visualizacao")
-    selected = st.multiselect(
-        "Selecione as grandezas que deseja plotar",
-        options=list(VARIABLE_CATALOG.keys()),
-        default=["Torque Eletromagnetico Te (N.m)", "Velocidade do Rotor n (RPM)",
-                 "Corrente de Fase A — Estator ias (A)"],
+
+def _inductor_pts(x0: float, y: float, w: float, n: int = 4):
+    """Gera pontos do simbolo de indutor em arcos."""
+    arc_w = w / n
+    t = np.linspace(np.pi, 0, 22)
+    xs_all, ys_all = [], []
+    for i in range(n):
+        cx = x0 + (i + 0.5) * arc_w
+        xs_all += list(cx + (arc_w/2) * np.cos(t))
+        ys_all += list(y    + (arc_w/2) * 0.65 * np.sin(t))
+        if i < n - 1:
+            xs_all.append(None); ys_all.append(None)
+    return xs_all, ys_all
+
+
+def _inductor_vert_pts(x: float, y0: float, h: float, n: int = 3):
+    """Gera pontos do simbolo de indutor vertical."""
+    arc_h = h / n
+    t = np.linspace(np.pi, 0, 22)
+    xs_all, ys_all = [], []
+    for i in range(n):
+        cy = y0 - (i + 0.5) * arc_h
+        xs_all += list(x + (arc_h/2) * 0.65 * np.sin(t))
+        ys_all += list(cy + (arc_h/2) * np.cos(t))
+        if i < n - 1:
+            xs_all.append(None); ys_all.append(None)
+    return xs_all, ys_all
+
+
+def render_tab_circuito(mp: MachineParams) -> None:
+    """
+    Aba Circuito Equivalente.
+    Desenha o circuito monofasico equivalente em T da MIT usando Plotly.
+    Topologia:
+        Vs  --[Rs]--[jXls]--+--[jXlr]--[Rr/s]--
+                             |
+                           [jXm]
+                             |
+                            GND
+    """
+    c   = get_palette()
+    dark = st.session_state.get("dark_mode", True)
+
+    bg_plot  = "#0d1117" if dark else "#ffffff"
+    fg       = c["text"]
+    wire_col = c["accent"]
+    comp_col = "#f97316"
+    src_col  = "#a78bfa"
+    lw = 2.2
+
+    fig = go.Figure()
+
+    def wire(x0, y0, x1, y1):
+        fig.add_shape(type="line", x0=x0, y0=y0, x1=x1, y1=y1,
+                      line=dict(color=wire_col, width=lw))
+
+    def ann(x, y, txt, size=11, color=fg, anchor="center"):
+        fig.add_annotation(x=x, y=y, text=txt, showarrow=False,
+                           font=dict(size=size, color=color,
+                                     family="Inter, 'Courier New', monospace"),
+                           xanchor=anchor, yanchor="middle", bgcolor="rgba(0,0,0,0)")
+
+    def comp_trace(xs, ys):
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines",
+                                 line=dict(color=comp_col, width=lw),
+                                 showlegend=False, hoverinfo="skip"))
+
+    # ── coordenadas ────────────────────────────────────────────────────────
+    Y  = 2.0      # fio superior
+    G  = 0.0      # GND
+    Ym = 1.0      # meio
+
+    # posicoes horizontais
+    X0  = 0.3    # centro da fonte
+    X1  = 0.75   # saida da fonte
+    XR0 = 0.75   # inicio Rs
+    XR1 = 2.0    # fim Rs
+    XL0 = 2.0    # inicio Xls
+    XL1 = 3.3    # fim Xls
+    XN  = 3.7    # no
+    XLR0= 4.1    # inicio Xlr
+    XLR1= 5.4    # fim Xlr
+    XRR0= 5.4    # inicio Rr/s
+    XRR1= 6.8    # fim Rr/s
+    XE  = 7.1    # extremo direito
+
+    # ── fios horizontais ────────────────────────────────────────────────────
+    wire(X1, Y, XR0, Y)         # saida fonte -> Rs
+    wire(XL1, Y, XN, Y)         # Xls -> no
+    wire(XN, Y, XLR0, Y)        # no -> Xlr
+    wire(XLR1, Y, XRR0, Y)      # Xlr -> Rr/s
+    wire(XRR1, Y, XE, Y)        # Rr/s -> fim
+    wire(X0 - 0.2, G, XE, G)    # GND completo
+
+    # ── fechamentos verticais ───────────────────────────────────────────────
+    wire(XE, Y, XE, G)          # lado direito
+
+    # ── fonte de tensao ─────────────────────────────────────────────────────
+    fig.add_shape(type="circle",
+                  x0=X0-0.22, y0=G+0.06, x1=X0+0.22, y1=Y-0.06,
+                  line=dict(color=src_col, width=lw+0.5),
+                  fillcolor=bg_plot)
+    wire(X0-0.22, Ym, X0-0.22, Ym)  # ponto ancoragem esq
+    wire(X0+0.22, Y,  X1, Y)         # fio saida superior
+    wire(X0-0.22, G+0.06, X0-0.22, G)  # fio base
+    ann(X0, Ym,       "Vs",  12, src_col)
+    ann(X0-0.5, Ym+0.3, "+", 14, src_col)
+    ann(X0-0.5, Ym-0.3, "\u2212", 14, src_col)
+
+    # ── Rs ──────────────────────────────────────────────────────────────────
+    xs, ys = _resistor_pts(XR0, Y, XR1-XR0)
+    comp_trace(xs, ys)
+    ann((XR0+XR1)/2, Y+0.33, "Rs",                 10, comp_col)
+    ann((XR0+XR1)/2, Y-0.33, f"{mp.Rs:.3f} \u03a9", 9,  fg)
+
+    # ── jXls ────────────────────────────────────────────────────────────────
+    xs, ys = _inductor_pts(XL0, Y, XL1-XL0)
+    comp_trace(xs, ys)
+    ann((XL0+XL1)/2, Y+0.37, "jX<sub>ls</sub>",   10, comp_col)
+    ann((XL0+XL1)/2, Y-0.33, f"{mp.Xls:.3f} \u03a9", 9, fg)
+
+    # ── ramo jXm (vertical) ─────────────────────────────────────────────────
+    wire(XN, Y,    XN, Y-0.2)
+    wire(XN, G+0.2, XN, G)
+    xsv, ysv = _inductor_vert_pts(XN, Y-0.2, 1.2)
+    comp_trace(xsv, ysv)
+    ann(XN+0.42, Ym+0.15, "jX<sub>m</sub>",    10, comp_col, "left")
+    ann(XN+0.42, Ym-0.18, f"{mp.Xm:.2f} \u03a9", 9, fg, "left")
+
+    # ── jXlr ────────────────────────────────────────────────────────────────
+    xs, ys = _inductor_pts(XLR0, Y, XLR1-XLR0)
+    comp_trace(xs, ys)
+    ann((XLR0+XLR1)/2, Y+0.37, "jX<sub>lr</sub>",    10, comp_col)
+    ann((XLR0+XLR1)/2, Y-0.33, f"{mp.Xlr:.3f} \u03a9", 9, fg)
+
+    # ── Rr/s ────────────────────────────────────────────────────────────────
+    xs, ys = _resistor_pts(XRR0, Y, XRR1-XRR0)
+    comp_trace(xs, ys)
+    ann((XRR0+XRR1)/2, Y+0.33, "R<sub>r</sub> / s",   10, comp_col)
+    ann((XRR0+XRR1)/2, Y-0.33, f"{mp.Rr:.3f} \u03a9 / s", 9, fg)
+
+    # ── nota de escorregamento ───────────────────────────────────────────────
+    ann((XRR0+XRR1)/2, G-0.45,
+        "s = (n<sub>s</sub> \u2212 n) / n<sub>s</sub>  (escorregamento)", 9, c["text_muted"])
+
+    fig.update_layout(
+        height=300,
+        margin=dict(l=30, r=20, t=20, b=50),
+        paper_bgcolor=bg_plot,
+        plot_bgcolor=bg_plot,
+        xaxis=dict(visible=False, range=[-0.2, 7.6]),
+        yaxis=dict(visible=False, range=[-0.7, 2.65]),
+        showlegend=False,
+        hovermode=False,
     )
-    return [VARIABLE_CATALOG[v] for v in selected], selected
+
+    st.markdown('<p class="section-label">Circuito Equivalente Monofasico em T — MIT (Gaiola de Esquilo)</p>',
+                unsafe_allow_html=True)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ── tabela de impedancias ────────────────────────────────────────────────
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    st.markdown('<p class="section-label">Impedancias e Grandezas Derivadas</p>', unsafe_allow_html=True)
+
+    Zs  = complex(mp.Rs, mp.Xls)
+    Zm  = complex(0, mp.Xm)
+    Zr  = complex(mp.Rr, mp.Xlr)
+
+    ci1, ci2, ci3, ci4 = st.columns(4)
+    ci1.metric("Impedancia do Estator |Zs|", f"{abs(Zs):.4f} Ohm")
+    ci2.metric("Reatancia de Magnetizacao Xm", f"{mp.Xm:.2f} Ohm")
+    ci3.metric("Impedancia do Rotor |Zr| (s=1)", f"{abs(Zr):.4f} Ohm")
+    ci4.metric("Reatancia Mutua Xml", f"{mp.Xml:.4f} Ohm")
+
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="section-label">Legenda dos Elementos</p>',
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("""
+        **Rs** — Resistencia do enrolamento do estator (perdas Joule no cobre do estator).
+
+        **jXls** — Reatancia de dispersao do estator (fluxo que nao atravessa o entreferro).
+
+        **jXm** — Reatancia de magnetizacao (representa o caminho do fluxo principal pelo nucleo).
+        """)
+    with c2:
+        st.markdown("""
+        **jXlr** — Reatancia de dispersao do rotor referida ao estator.
+
+        **Rr/s** — Resistencia do rotor dividida pelo escorregamento. Quando s = 1 (partida), Rr/s = Rr.
+        Quando s se aproxima de zero (velocidade sincrona), Rr/s tende ao infinito (circuito aberto).
+
+        **Vs** — Tensao de fase aplicada ao estator (Vl / raiz(3)).
+        """)
 
 
-# =============================================================================
-# SECAO 8 — CONFIGURACAO DE TEMPO E PASSO
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCO F — ABA RESULTADOS
+# ═════════════════════════════════════════════════════════════════════════════
 
-def render_time_config():
-    """Tempo de simulacao e passo de integracao com explicacao didatica."""
-    st.markdown("## Parametros de Simulacao")
-
-    col_params, col_info = st.columns([1, 1])
-
-    with col_params:
-        tmax = st.number_input(
-            "Tempo total de simulacao — tmax (s)",
-            min_value=0.1, max_value=60.0, value=2.0, step=0.1, format="%.1f"
-        )
-        h = st.number_input(
-            "Passo de integracao — h (s)",
-            min_value=0.00001, max_value=0.01, value=0.001,
-            step=0.0001, format="%.5f"
-        )
-
-    with col_info:
-        info_box(
-            "<strong>Como esses parametros afetam a simulacao:</strong><br><br>"
-            "<strong>Tempo total (tmax):</strong> determina por quanto tempo o transitorio e observado. "
-            "Valores muito curtos podem nao mostrar o regime permanente; valores excessivos aumentam "
-            "drasticamente o tempo de processamento.<br><br>"
-            "<strong>Passo de integracao (h):</strong> controla a precisao numerica e a estabilidade. "
-            "Passos muito grandes (h &gt; 0.005 s) podem gerar instabilidade numerica "
-            "e resultados fisicamente incorretos. "
-            "Passos muito pequenos (h &lt; 0.0001 s) aumentam o tempo de computo "
-            "sem ganho pratico de precisao. "
-            "O valor padrao (h = 0.001 s) oferece bom equilibrio para a maioria dos experimentos."
-        )
-
-    n_steps = int(tmax / h)
-    st.caption(f"Total de passos de integracao: {n_steps:,}")
-    if n_steps > 100_000:
-        st.warning("Numero elevado de passos. A simulacao pode demorar varios segundos.")
-
-    return tmax, h
+def _line_colors(dark: bool) -> list:
+    return [
+        "#4f8ef7","#f97316","#22c55e","#a78bfa",
+        "#ec4899","#14b8a6","#f59e0b","#6366f1",
+        "#84cc16","#ef4444","#06b6d4","#d946ef",
+    ] if dark else [
+        "#1d4ed8","#ea580c","#16a34a","#7c3aed",
+        "#db2777","#0d9488","#d97706","#4f46e5",
+        "#65a30d","#dc2626","#0891b2","#c026d3",
+    ]
 
 
-# =============================================================================
-# SECAO 9 — PLOTAGEM COM PLOTLY
-# =============================================================================
-
-def build_plotly_figure(
-    res: dict,
-    var_keys: list[str],
-    var_labels: list[str],
-    dark_plot: bool,
-    t_events: list[float] = None,
-) -> go.Figure:
-    """
-    Constroi um grafico Plotly interativo com as variaveis selecionadas.
-    Cada variavel ocupa seu proprio subgrafico para leitura clara.
-    """
+def build_plotly_figure(res: dict, var_keys: list, var_labels: list,
+                         dark: bool, t_events: list = None) -> go.Figure:
     n_vars = len(var_keys)
     if n_vars == 0:
         return go.Figure()
 
-    plot_bg   = "#0e1117" if dark_plot else "#ffffff"
-    paper_bg  = "#161b2e" if dark_plot else "#f8faff"
-    font_col  = "#e8eaf0" if dark_plot else "#1a1d2e"
-    grid_col  = "#2e3250" if dark_plot else "#e0e6f0"
-    line_colors = [
-        "#4f8ef7", "#f97316", "#22c55e", "#a78bfa",
-        "#ec4899", "#14b8a6", "#f59e0b", "#6366f1",
-        "#84cc16", "#ef4444", "#06b6d4", "#d946ef",
-    ]
+    plot_bg  = "#0d1117" if dark else "#ffffff"
+    paper_bg = "#161b27" if dark else "#f8faff"
+    fg       = "#e4e8f5" if dark else "#111827"
+    grid_col = "#2a3150" if dark else "#e5eaf5"
+    colors   = _line_colors(dark)
 
     fig = make_subplots(
         rows=n_vars, cols=1,
         shared_xaxes=True,
         subplot_titles=var_labels,
-        vertical_spacing=0.06 / max(n_vars, 1),
+        vertical_spacing=max(0.03, 0.08 / n_vars),
     )
-
     t = res["t"]
-
-    for i, (key, label) in enumerate(zip(var_keys, var_labels), start=1):
-        y = res[key]
-        col = line_colors[(i - 1) % len(line_colors)]
-        fig.add_trace(
-            go.Scatter(
-                x=t, y=y,
-                mode="lines",
-                name=label,
-                line=dict(color=col, width=1.8),
-                hovertemplate=f"<b>{label}</b><br>t = %{{x:.4f}} s<br>y = %{{y:.4f}}<extra></extra>",
-            ),
-            row=i, col=1,
-        )
+    for i, (key, lbl) in enumerate(zip(var_keys, var_labels), 1):
+        col = colors[(i-1) % len(colors)]
+        fig.add_trace(go.Scatter(
+            x=t, y=res[key], mode="lines", name=lbl,
+            line=dict(color=col, width=1.9),
+            hovertemplate=f"<b>{lbl}</b><br>t = %{{x:.4f}} s<br>valor = %{{y:.4f}}<extra></extra>",
+        ), row=i, col=1)
         if t_events:
             for te in t_events:
-                fig.add_vline(
-                    x=te, line_dash="dash", line_color="#94a3b8", line_width=1.2,
-                    row=i, col=1,
-                )
-        fig.update_yaxes(
-            row=i, col=1,
-            showgrid=True, gridcolor=grid_col, gridwidth=0.5,
-            zeroline=True, zerolinecolor=grid_col, zerolinewidth=1,
-            tickfont=dict(size=11, color=font_col),
-            title_font=dict(size=11, color=font_col),
-        )
+                fig.add_vline(x=te, line_dash="dot", line_color="#64748b",
+                              line_width=1.2, row=i, col=1)
+        fig.update_yaxes(row=i, col=1,
+                         showgrid=True, gridcolor=grid_col, gridwidth=0.4,
+                         zeroline=True, zerolinecolor=grid_col,
+                         tickfont=dict(size=10, color=fg))
+    fig.update_xaxes(row=n_vars, col=1,
+                     showgrid=True, gridcolor=grid_col, gridwidth=0.4,
+                     tickfont=dict(size=10, color=fg), title_text="Tempo (s)")
+    for ann in fig.layout.annotations:
+        ann.font.color = fg
+        ann.font.size  = 11
 
-    fig.update_xaxes(
-        showgrid=True, gridcolor=grid_col, gridwidth=0.5,
-        tickfont=dict(size=11, color=font_col),
-        title_text="Tempo (s)",
-        row=n_vars, col=1,
-    )
-
-    total_height = max(320, 220 * n_vars)
     fig.update_layout(
-        height=total_height,
+        height=max(280, 210 * n_vars),
         paper_bgcolor=paper_bg,
         plot_bgcolor=plot_bg,
-        font=dict(family="Inter, Segoe UI, system-ui, sans-serif", size=12, color=font_col),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom", y=1.01,
-            xanchor="right", x=1,
-            font=dict(size=11),
-            bgcolor="rgba(0,0,0,0)",
-        ),
-        margin=dict(l=60, r=20, t=60, b=40),
+        font=dict(family="Inter, system-ui", size=11, color=fg),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=10),
+                    bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=55, r=20, t=55, b=40),
         hovermode="x unified",
     )
-
-    # Anotacoes dos subplot titles com cor correta
-    for annotation in fig.layout.annotations:
-        annotation.font.color = font_col
-        annotation.font.size  = 12
-
     return fig
 
 
-def render_results(res: dict, var_keys: list, var_labels: list, dark_plot: bool, t_events=None):
-    """Exibe graficos e tabela de regime permanente."""
-    st.markdown("### Resultados da Simulacao")
+def render_tab_resultados(res: dict, var_keys: list, var_labels: list,
+                           dark: bool, t_events: list, exp_config: dict) -> None:
+    c = get_palette()
 
-    # Controle do fundo do grafico (independente do tema geral)
-    dark_plot = st.toggle("Fundo escuro na area de plotagem", value=dark_plot, key="plot_bg_toggle")
+    # ── KPIs ────────────────────────────────────────────────────────────────
+    st.markdown('<p class="section-label">Indicadores de Regime Permanente</p>',
+                unsafe_allow_html=True)
 
-    fig = build_plotly_figure(res, var_keys, var_labels, dark_plot, t_events)
-    st.plotly_chart(fig, use_container_width=True)
+    n_ss   = res["n"][-1]
+    Te_ss  = res["Te"][-1]
+    ias_ss = res["ias"][-1]
+    wr_ss  = res["wr"][-1]
+    Te_max = float(np.max(res["Te"]))
+    ias_pk = float(np.max(np.abs(res["ias"])))
 
-    # Tabela de regime permanente
-    st.markdown("### Valores de Regime Permanente (ultimo instante)")
-    ss = {
-        "Velocidade (RPM)":         f"{res['n'][-1]:.2f}",
-        "Velocidade angular (rad/s)":f"{res['wr'][-1]:.4f}",
-        "Torque Te (N.m)":          f"{res['Te'][-1]:.4f}",
-        "ids (A)":                  f"{res['ids'][-1]:.4f}",
-        "iqs (A)":                  f"{res['iqs'][-1]:.4f}",
-        "ias (A)":                  f"{res['ias'][-1]:.4f}",
-    }
-    col1, col2, col3 = st.columns(3)
-    items = list(ss.items())
-    for idx, (k, v) in enumerate(items):
-        [col1, col2, col3][idx % 3].metric(k, v)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Velocidade de Regime (RPM)",   f"{n_ss:.1f}")
+    k2.metric("Torque de Regime  Te  (N.m)",  f"{Te_ss:.2f}")
+    k3.metric("Torque Maximo  Te_max  (N.m)", f"{Te_max:.2f}")
+    k4.metric("Corrente de Pico  ias  (A)",   f"{ias_pk:.2f}")
+    k5.metric("Corrente Regime  ias  (A)",    f"{abs(ias_ss):.2f}")
+    k6.metric("Velocidade Angular  wr  (rad/s)", f"{wr_ss:.3f}")
 
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-# =============================================================================
-# SECAO 10 — EXECUCAO DA SIMULACAO
-# =============================================================================
+    # ── controle do fundo do grafico ─────────────────────────────────────────
+    col_tog, _ = st.columns([1, 4])
+    with col_tog:
+        dark_plot = st.toggle("Fundo escuro no grafico", value=dark, key="res_plot_dark")
 
-def build_voltage_and_torque_fns(config: dict, mp: MachineParams):
-    """Constroi as funcoes de tensao e torque conforme o experimento."""
-    exp = config["exp_type"]
-    t_events = []
-
-    if exp == "dol":
-        vfn = lambda t: mp.Vl
-        tfn = lambda t: torque_step(t, 0.0, config["Tl_final"], config["t_carga"])
-        t_events = [config["t_carga"]]
-
-    elif exp == "yd":
-        Vl_Y = mp.Vl / np.sqrt(3.0)
-        Tl_yd = config["Tl_final"]
-        vfn  = lambda t: voltage_reduced_start(t, mp.Vl, Vl_Y, config["t_2"])
-        tfn  = lambda t: torque_step(t, 0.0, Tl_yd, config["t_carga"])
-        t_events = [config["t_2"], config["t_carga"]]
-
-    elif exp == "comp":
-        Vl_red  = mp.Vl * config["voltage_ratio"]
-        Tl_comp = config["Tl_final"]
-        vfn    = lambda t: voltage_reduced_start(t, mp.Vl, Vl_red, config["t_2"])
-        tfn    = lambda t: torque_step(t, 0.0, Tl_comp, config["t_carga"])
-        t_events = [config["t_2"], config["t_carga"]]
-
-    elif exp == "soft":
-        Vl_init = mp.Vl * config["voltage_ratio"]
-        vfn = lambda t: voltage_soft_starter(t, mp.Vl, Vl_init, config["t_2"], config["t_pico"])
-        tfn = lambda t: torque_step(t, 0.0, config["Tl_final"], config["t_carga"])
-        t_events = [config["t_2"], config["t_pico"], config["t_carga"]]
-
-    elif exp == "carga":
-        vfn = lambda t: mp.Vl
-        tfn = lambda t: torque_step(t, 0.0, config["Tl_final"], config["t_carga"])
-        t_events = [config["t_carga"]]
-
-    elif exp == "gerador":
-        Tl_neg = -config["Tl_mec"]
-        vfn = lambda t: mp.Vl
-        tfn = lambda t: Tl_neg
-        t_events = [config["t_2"]]
-
+    # ── graficos ─────────────────────────────────────────────────────────────
+    if var_keys:
+        fig = build_plotly_figure(res, var_keys, var_labels, dark_plot, t_events)
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        vfn = lambda t: mp.Vl
-        tfn = lambda t: 0.0
-
-    return vfn, tfn, t_events
+        st.info("Nenhuma grandeza selecionada. Volte a aba Simulacao e escolha variaveis para plotar.")
 
 
-# =============================================================================
-# SECAO 11 — ABA DE APRENDIZADO
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCO G — ABA TEORIA
+# ═════════════════════════════════════════════════════════════════════════════
 
-def render_learning_tab():
-    """Aba educacional: parametros, efeitos fisicos, instabilidades."""
-    st.markdown("# Aba de Aprendizado")
-    st.markdown(
-        "Esta aba apresenta a influencia fisica de cada parametro no comportamento "
-        "da maquina de inducao trifasica, sem exibir valores numericos especificos. "
-        "O objetivo e construir intuicao sobre o sistema antes ou apos a simulacao."
-    )
-
-    # ---- PARAMETROS ELETRICOS ----
-    st.markdown("## Parametros Eletricos")
-
-    params_eletricos = [
-        {
-            "nome": "Vl — Tensao de Linha RMS",
-            "desc": "A tensao aplicada ao estator define o fluxo de magnetizacao e, portanto, "
-                    "o torque disponivel. E a fonte de energia que aciona a maquina.",
-            "aumenta": "O torque maximo cresce proporcionalmente ao quadrado da tensao. "
-                        "Correntes de partida tambem aumentam significativamente.",
-            "diminui": "O torque de partida cai, e pode ser insuficiente para vencer a carga. "
-                        "O motor pode nao conseguir partir (nao sai do lugar).",
-            "risco": "Tensao muito elevada causa saturacao magnetica do nucleo, "
-                     "aquecimento excessivo e possivel dano ao isolamento. "
-                     "Tensao muito baixa pode provocar parada brusca sob carga (stall).",
-        },
-        {
-            "nome": "f — Frequencia da Rede",
-            "desc": "A frequencia determina a velocidade sincrona do campo girante. "
-                    "Toda a dinamica da maquina e referenciada a ela.",
-            "aumenta": "A velocidade sincrona sobe proporcionalmente. "
-                        "As reatancias Xm, Xls, Xlr tambem crescem (X = 2pi.f.L), "
-                        "alterando o circuito equivalente.",
-            "diminui": "Menor velocidade sincrona e menor velocidade de operacao. "
-                        "Com tensao constante, o fluxo aumenta (V/f aumenta), "
-                        "podendo causar saturacao.",
-            "risco": "Operar fora da frequencia nominal sem ajuste de tensao (controle V/f) "
-                     "resulta em saturacao magnetica ou fluxo insuficiente, "
-                     "comprometendo eficiencia e vida util.",
-        },
-        {
-            "nome": "Rs — Resistencia do Estator",
-            "desc": "Representa as perdas ohmica nas bobinas do estator. "
-                    "Afeta a tensao efetiva que chega ao circuito magnetico.",
-            "aumenta": "Maior queda de tensao no estator, menor tensao efetiva nos terminais magneticos. "
-                        "Reducao do torque disponivel e aumento das perdas por calor.",
-            "diminui": "Melhor eficiencia e menor queda de tensao interna. "
-                        "O modelo fica mais proximo de um transformador ideal.",
-            "risco": "Rs muito alto (resistencia elevada por desgaste ou falha de bobina) "
-                     "provoca superaquecimento e queda de desempenho. "
-                     "Rs proximo de zero pode gerar oscilacoes numericas na simulacao "
-                     "em passos de integracao grandes.",
-        },
-        {
-            "nome": "Rr — Resistencia do Rotor",
-            "desc": "Representa as perdas ohmicas nas barras do rotor (gaiola de esquilo). "
-                    "E o parametro que mais influencia o escorregamento e o torque de partida.",
-            "aumenta": "O escorregamento de regime aumenta (rotor gira mais devagar). "
-                        "O torque de partida aumenta ate o ponto maximo de Rr. "
-                        "A curva T x n se alarga.",
-            "diminui": "Menor escorregamento em regime (mais eficiente). "
-                        "Menor torque de partida. "
-                        "A curva T x n se estreita proximo a velocidade sincrona.",
-            "risco": "Rr muito alto (gaiola com barras fraturadas) gera superaquecimento do rotor "
-                     "e escorregamento excessivo. "
-                     "Rr muito proximo de zero causa instabilidade numerica (denominadores pequenos nas EDOs).",
-        },
-        {
-            "nome": "Xm — Reatancia de Magnetizacao",
-            "desc": "Representa o ramo magnetizante do circuito equivalente. "
-                    "Controla a corrente de excitacao e o fluxo de entreferro.",
-            "aumenta": "Menor corrente de magnetizacao (motor mais eficiente, fator de potencia melhor). "
-                        "O nucleo e menos saturo.",
-            "diminui": "Maior corrente de magnetizacao necessaria para manter o fluxo. "
-                        "Fator de potencia pior e aquecimento maior.",
-            "risco": "Xm muito baixo implica maquina com alta corrente de excitacao "
-                     "(motor de baixa qualidade magnetica ou nucleo saturado). "
-                     "Na simulacao, Xm proximo de zero produz Xml tendendo a zero, "
-                     "causando divisao por numeros muito pequenos.",
-        },
-        {
-            "nome": "Xls / Xlr — Reatancias de Dispersao",
-            "desc": "Representam os fluxos que nao se acoplam entre estator e rotor "
-                    "(fluxos de dispersao). Limitam a corrente de curto-circuito e de partida.",
-            "aumenta": "Maior impedancia de curto-circuito. "
-                        "Corrente de partida reduzida, mas tambem menor torque maximo.",
-            "diminui": "Corrente de partida maior, torque maximo maior, "
-                        "mas o motor fica mais sensivel a transitories.",
-            "risco": "Dispersao muito baixa resulta em correntes de partida extremamente elevadas, "
-                     "potencialmente danosas ao enrolamento. "
-                     "Dispersao muito alta limita o torque disponivel e pode impedir a partida.",
-        },
-    ]
-
-    for p in params_eletricos:
-        st.markdown(
-            f'<div class="learn-card">'
-            f'<h4>{p["nome"]}</h4>'
-            f'<p>{p["desc"]}</p>'
-            f'<p><span class="up">Se aumentar:</span> {p["aumenta"]}</p>'
-            f'<p><span class="down">Se diminuir:</span> {p["diminui"]}</p>'
-            f'<div class="warn">Atencao — calibracoes extremas: {p["risco"]}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ---- PARAMETROS MECANICOS ----
-    st.markdown("## Parametros Mecanicos")
-
-    params_mecanicos = [
-        {
-            "nome": "p — Numero de Polos",
-            "desc": "Define a velocidade sincrona da maquina (ns = 120.f / p). "
-                    "Maquinas com mais polos giram mais devagar para uma mesma frequencia.",
-            "aumenta": "Menor velocidade sincrona e, portanto, menor velocidade de operacao. "
-                        "Util em aplicacoes de baixa rotacao (bombas, ventiladores grandes).",
-            "diminui": "Maior velocidade sincrona. "
-                        "Menor torque para a mesma potencia (T = P / w).",
-            "risco": "O numero de polos e um parametro discreto (sempre par). "
-                     "Inserir valor impar ou zero causa erro fisico. "
-                     "Simular p alto com frequencia baixa pode gerar velocidades irrealistas.",
-        },
-        {
-            "nome": "J — Momento de Inercia",
-            "desc": "Representa a resistencia do conjunto rotor-carga a variacoes de velocidade "
-                    "(segunda lei de Newton rotacional: T = J . d_wr/dt).",
-            "aumenta": "Aceleracao mais lenta — o transitorio se prolonga. "
-                        "O sistema e mais amortecido naturalmente.",
-            "diminui": "Aceleracao muito rapida. "
-                        "O rotor responde quase instantaneamente aos transitorios de torque.",
-            "risco": "J muito baixo pode causar oscilacoes de velocidade dificeis de controlar "
-                     "em sistemas com variacao de carga. "
-                     "J muito alto prolonga o transitorio a ponto de ultrapassar o tempo de simulacao.",
-        },
-        {
-            "nome": "B — Coeficiente de Atrito Viscoso",
-            "desc": "Representa perdas mecanicas proporcionais a velocidade "
-                    "(rolamentos, ventilacao). Produz torque de freio B.wr.",
-            "aumenta": "Maior dissipacao mecanica. "
-                        "A velocidade de regime permanente e ligeiramente menor.",
-            "diminui": "Menor dissipacao. "
-                        "Com B = 0 (padrao), toda a resistencia ao movimento vem da carga.",
-            "risco": "B muito alto pode causar parada do motor sem carga nominal "
-                     "(perdas mecanicas superando o torque eletromagnetico). "
-                     "Na pratica, atrito excessivo indica falha nos mancais.",
-        },
-    ]
-
-    for p in params_mecanicos:
-        st.markdown(
-            f'<div class="learn-card">'
-            f'<h4>{p["nome"]}</h4>'
-            f'<p>{p["desc"]}</p>'
-            f'<p><span class="up">Se aumentar:</span> {p["aumenta"]}</p>'
-            f'<p><span class="down">Se diminuir:</span> {p["diminui"]}</p>'
-            f'<div class="warn">Atencao — calibracoes extremas: {p["risco"]}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ---- PARAMETROS DE SIMULACAO ----
-    st.markdown("## Parametros de Simulacao")
-
-    sim_params = [
-        {
-            "nome": "tmax — Tempo Total de Simulacao",
-            "desc": "Define o horizonte temporal da integracao numerica.",
-            "aumenta": "Permite observar o regime permanente e transitorios mais longos. "
-                        "Aumenta proporcionalmente o tempo de processamento.",
-            "diminui": "Simulacao mais rapida, mas pode nao capturar o regime permanente.",
-            "risco": "tmax excessivamente grande com passo pequeno pode travar o navegador "
-                     "por consumo de memoria e tempo de CPU.",
-        },
-        {
-            "nome": "h — Passo de Integracao",
-            "desc": "Controla a discretizacao temporal do metodo Runge-Kutta. "
-                    "E o parametro mais critico para estabilidade numerica.",
-            "aumenta": "Simulacao mais rapida, mas menos precisa. "
-                        "Passos grandes podem causar instabilidade numerica "
+THEORY_PARAMS = [
+    {
+        "group": "Parametros Eletricos",
+        "items": [
+            {
+                "nome": "Vl — Tensao de Linha RMS",
+                "desc": "Define a amplitude do campo magnetico girante no estator. "
+                        "E a grandeza que estabelece o ponto de operacao magnetico da maquina.",
+                "up":   "O torque maximo cresce com o quadrado da tensao. "
+                        "A corrente de partida tambem aumenta proporcionalmente.",
+                "down": "O torque de partida cai. Pode ser insuficiente para vencer a carga estatica, "
+                        "impedindo o motor de partir.",
+                "warn": "Sobretensao causa saturacao do nucleo e aquecimento do isolamento. "
+                        "Subtensao severa pode causar parada brusca (stall) com o motor em carga.",
+            },
+            {
+                "nome": "f — Frequencia da Rede",
+                "desc": "Determina a velocidade sincrona do campo girante (ns = 120f/p). "
+                        "Todas as reatancias do circuito equivalente sao proporcionais a f.",
+                "up":   "Velocidade sincrona maior e reatancias maiores (Xm, Xls, Xlr crescem). "
+                        "O torque disponivel se redistribui ao longo da curva T x n.",
+                "down": "Velocidade menor. Com tensao constante, o fluxo aumenta (V/f sobe), "
+                        "podendo saturar o nucleo.",
+                "warn": "Operacao fora da frequencia nominal sem controle V/f proporcional "
+                        "compromete o fluxo de entreferro e a eficiencia.",
+            },
+            {
+                "nome": "Rs — Resistencia do Estator",
+                "desc": "Representa as perdas Joule no cobre do enrolamento estatorico. "
+                        "Provoca queda de tensao interna, reduzindo a tensao efetiva no entreferro.",
+                "up":   "Maior dissipacao de energia, menor tensao no entreferro e reducao do torque. "
+                        "O motor aquece mais em regime.",
+                "down": "Menor queda interna e melhor eficiencia. "
+                        "O modelo se aproxima de um transformador ideal.",
+                "warn": "Rs muito elevado (enrolamento danificado) pode causar sobreaquecimento fatal. "
+                        "Rs proximo de zero gera instabilidade numerica nas EDOs com passos grandes.",
+            },
+            {
+                "nome": "Rr — Resistencia do Rotor",
+                "desc": "Parametro central da curva de torque. Controla o escorregamento de regime "
+                        "e o torque de partida. Nas barras da gaiola, e inversamente proporcional "
+                        "a condutividade do material.",
+                "up":   "O escorregamento de regime aumenta (o rotor gira mais devagar em relacao ao campo). "
+                        "O torque de partida aumenta ate um ponto otimo e depois decresce. "
+                        "A curva T x n se torna mais plana e larga.",
+                "down": "Menor escorregamento em regime e melhor eficiencia. "
+                        "Menor torque de partida. A curva T x n fica mais estreita e alta proximo a ns.",
+                "warn": "Rr muito alto (barras da gaiola fraturadas) provoca escorregamento excessivo "
+                        "e sobreaquecimento do rotor. "
+                        "Rr proximo de zero causa instabilidade numerica (singularidade nas equacoes do rotor).",
+            },
+            {
+                "nome": "Xm — Reatancia de Magnetizacao",
+                "desc": "Representa o ramo shunt do circuito equivalente: o caminho do fluxo magnetico "
+                        "pelo nucleo de ferro. Quanto maior Xm, menos corrente e desviada para magnetizar o nucleo.",
+                "up":   "Menor corrente de magnetizacao, melhor fator de potencia e maior eficiencia. "
+                        "O motor se comporta de forma mais proxima ao ideal.",
+                "down": "Maior corrente de magnetizacao (circula mesmo em vazio), "
+                        "pior fator de potencia e maior dissipacao.",
+                "warn": "Xm muito baixo representa um nucleo de ma qualidade magnetica ou saturado. "
+                        "Na simulacao, Xm proximo de zero torna Xml desprezivel, "
+                        "causando divisao por valores muito pequenos e divergencia numerica.",
+            },
+            {
+                "nome": "Xls e Xlr — Reatancias de Dispersao",
+                "desc": "Representam os fluxos que nao cruzam o entreferro (fluxos de dispersao "
+                        "do estator e do rotor). Limitam a corrente de curto-circuito e a capacidade "
+                        "de transferencia de torque.",
+                "up":   "Maior impedancia total. A corrente de partida e reduzida, "
+                        "mas o torque maximo tambem cai.",
+                "down": "Correntes de partida mais elevadas e torque maximo maior, "
+                        "porem o motor fica mais sensivel a transitorios e variacoes de carga.",
+                "warn": "Dispersao muito baixa leva a correntes de partida muito altas, "
+                        "podendo danificar o isolamento. "
+                        "Dispersao muito alta limita o torque a ponto de impedir a partida sob carga.",
+            },
+        ],
+    },
+    {
+        "group": "Parametros Mecanicos",
+        "items": [
+            {
+                "nome": "p — Numero de Polos",
+                "desc": "Define a velocidade sincrona (ns = 120f/p) e, portanto, "
+                        "a faixa de velocidade de operacao da maquina.",
+                "up":   "Velocidade sincrona menor — a maquina opera em rotacoes mais baixas. "
+                        "Para a mesma potencia, o torque necessario e maior.",
+                "down": "Velocidade sincrona maior. O torque nominal e menor para a mesma potencia.",
+                "warn": "O numero de polos e sempre par e discreto. "
+                        "Valores impares ou muito altos com frequencia baixa podem gerar "
+                        "velocidades de operacao fisicamente irrealistas no modelo.",
+            },
+            {
+                "nome": "J — Momento de Inercia",
+                "desc": "Representa a resistencia do conjunto rotor-carga a variacoes de velocidade "
+                        "(segunda lei de Newton rotacional: Te - Tl = J . d(wr)/dt).",
+                "up":   "Aceleracao mais lenta e transitorio mais prolongado. "
+                        "O sistema absorve e libera energia cinetica de forma mais gradual.",
+                "down": "Aceleracao muito rapida. O rotor responde quase instantaneamente "
+                        "a qualquer variacao de torque.",
+                "warn": "J muito baixo pode causar oscilacoes de velocidade em sistemas com variacao "
+                        "de carga. J muito alto pode fazer o transitorio ultrapassar o tempo de simulacao "
+                        "sem atingir o regime permanente.",
+            },
+            {
+                "nome": "B — Coeficiente de Atrito Viscoso",
+                "desc": "Modela as perdas mecanicas proporcionais a velocidade: "
+                        "mancais, ventilacao forcada, resistencia do fluido. "
+                        "Produz um torque de freio igual a B.wr.",
+                "up":   "Maior dissipacao mecanica e velocidade de regime ligeiramente menor. "
+                        "O sistema amorte naturalmente transitorios de velocidade.",
+                "down": "Menor atrito. Com B = 0 (padrao), toda resistencia ao movimento "
+                        "vem exclusivamente da carga mecanica.",
+                "warn": "B muito alto pode paralisar o motor mesmo sem carga nominal, "
+                        "pois as perdas mecanicas superam o torque eletromagnetico disponivel. "
+                        "Na pratica, atrito excessivo indica falha em mancais ou rolamentos.",
+            },
+        ],
+    },
+    {
+        "group": "Parametros de Simulacao",
+        "items": [
+            {
+                "nome": "tmax — Tempo Total de Simulacao",
+                "desc": "Horizonte temporal da integracao numerica. "
+                        "Deve ser longo o suficiente para capturar o regime permanente de interesse.",
+                "up":   "Mais do transitorio e do regime sao observados, "
+                        "mas o tempo de processamento cresce proporcionalmente.",
+                "down": "Simulacao mais rapida, mas pode encerrar antes de o sistema atingir o regime.",
+                "warn": "tmax muito grande combinado com passo pequeno pode consumir muita memoria "
+                        "e travar o navegador.",
+            },
+            {
+                "nome": "h — Passo de Integracao",
+                "desc": "Controla a discretizacao temporal do metodo Runge-Kutta. "
+                        "E o parametro mais critico para estabilidade e precisao numerica.",
+                "up":   "Simulacao mais rapida, mas menos precisa. "
+                        "Passos muito grandes causam instabilidade numerica "
                         "(oscilacoes artificiais ou divergencia).",
-            "diminui": "Maior precisao e estabilidade, mas tempo de computo muito maior. "
-                        "Para a MIT com os parametros padrao, h < 0.0001 s rara vez e necessario.",
-            "risco": "h > 0.005 s pode gerar resultados fisicamente invalidos (torques divergentes). "
-                     "A regra pratica e h <= 1 / (10 . wb) para garantir estabilidade "
-                     "no referencial sincrono.",
-        },
-    ]
+                "down": "Maior precisao e estabilidade, mas custo computacional muito maior. "
+                        "Abaixo de certo limiar, o ganho de precisao e desprezivel.",
+                "warn": "h acima de 0,005 s pode gerar resultados fisicamente incorretos "
+                        "para os parametros tipicos da MIT. "
+                        "A regra pratica e h menor ou igual a 1/(10.wb) para garantir estabilidade.",
+            },
+        ],
+    },
+]
 
-    for p in sim_params:
-        st.markdown(
-            f'<div class="learn-card">'
-            f'<h4>{p["nome"]}</h4>'
-            f'<p>{p["desc"]}</p>'
-            f'<p><span class="up">Se aumentar:</span> {p["aumenta"]}</p>'
-            f'<p><span class="down">Se diminuir:</span> {p["diminui"]}</p>'
-            f'<div class="warn">Atencao — calibracoes extremas: {p["risco"]}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
 
-    # ---- CONCEITOS DO MODELO ----
-    st.markdown("## Conceitos do Modelo Matematico")
-
+def render_tab_teoria() -> None:
     st.markdown(
-        '<div class="learn-card">'
-        '<h4>Transformada de Park e Referencial dq</h4>'
-        '<p>A transformada de Park converte as tres fases da maquina em dois eixos ortogonais '
-        '(d e q), eliminando a dependencia temporal dos coeficientes das equacoes diferenciais. '
-        'Isso simplifica drasticamente a analise e permite integracao numerica eficiente.</p>'
-        '<p><span class="up">Referencial Sincrono (w_ref = we):</span> '
-        'em regime permanente, Vds e Vqs sao constantes (DC). '
-        'Ideal para analise de regime permanente e controle vetorial.</p>'
-        '<p><span class="up">Referencial Rotorico (w_ref = wr):</span> '
-        'as variaveis do rotor tornam-se DC em regime. '
-        'Util para controle de campo orientado pelo rotor.</p>'
-        '<p><span class="up">Referencial Estacionario (w_ref = 0):</span> '
-        'as variaveis variam na frequencia de escorregamento. '
-        'Mais intuitivo fisicamente para analise de transitorio.</p>'
-        '<div class="warn">Os tres referenciais produzem o mesmo torque Te e velocidade wr '
-        '(grandezas fisicas invariantes). Apenas as formas de onda das correntes e tensoes dq diferem.</div>'
+        "Nesta aba os parametros sao descritos em termos de seu significado fisico e do "
+        "impacto qualitativo que provocam no comportamento da maquina. "
+        "Nenhum valor numerico especifico e apresentado: o objetivo e construir intuicao "
+        "sobre o sistema eletrico.",
+    )
+    for group in THEORY_PARAMS:
+        st.markdown(f"## {group['group']}")
+        for item in group["items"]:
+            st.markdown(
+                f'<div class="theory-card">'
+                f'<h4>{item["nome"]}</h4>'
+                f'<p>{item["desc"]}</p>'
+                f'<p><span class="tc-up">Se aumentar:</span> {item["up"]}</p>'
+                f'<p><span class="tc-down">Se diminuir:</span> {item["down"]}</p>'
+                f'<div class="tc-warn">Atencao — calibracoes extremas: {item["warn"]}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCO H — ORQUESTRADOR PRINCIPAL
+# ═════════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    # inicializa estado
+    if "dark_mode" not in st.session_state:
+        st.session_state["dark_mode"] = True
+    if "sim_result" not in st.session_state:
+        st.session_state["sim_result"] = None
+
+    # CSS sempre primeiro
+    apply_css()
+    c = get_palette()
+
+    # ── cabecalho ─────────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="app-header">'
+        '<div>'
+        '<div class="app-title">Simulador de Maquinas Eletricas</div>'
+        '<div class="app-subtitle">Modelo 0dq de Krause &mdash; Integracao Numerica RK4 (scipy.odeint)</div>'
+        '</div>'
         '</div>',
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        '<div class="learn-card">'
-        '<h4>Escorregamento (Slip)</h4>'
-        '<p>O escorregamento e a diferenca relativa entre a velocidade sincrona e a velocidade do rotor. '
-        'Em motores, o rotor sempre gira abaixo da velocidade sincrona para que haja inducao e, '
-        'portanto, torque eletromagnetico.</p>'
-        '<p><span class="up">Escorregamento baixo:</span> maquina proxima ao regime nominal, '
-        'alta eficiencia, baixas perdas no rotor.</p>'
-        '<p><span class="down">Escorregamento alto (partida):</span> correntes elevadas, '
-        'maior dissipacao termica no rotor, torque varia significativamente.</p>'
-        '<div class="warn">Escorregamento negativo significa que o rotor gira acima da velocidade sincrona: '
-        'a maquina opera como gerador (modo gerador de inducao).</div>'
-        '</div>',
-        unsafe_allow_html=True,
+    # ── selecao de maquina ────────────────────────────────────────────────────
+    selected = st.session_state.get("selected_machine")
+
+    if not selected:
+        render_machine_selector()
+        return
+
+    # ── breadcrumb / voltar ───────────────────────────────────────────────────
+    col_back, col_title = st.columns([1, 8])
+    with col_back:
+        if st.button("Voltar", key="btn_back"):
+            st.session_state["selected_machine"] = None
+            st.session_state["sim_result"]        = None
+            st.rerun()
+    with col_title:
+        machine_name = next(m["name"] for m in MACHINES if m["key"] == selected)
+        st.markdown(f"### {machine_name}")
+
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+
+    # ── abas da MIT ───────────────────────────────────────────────────────────
+    tab_sim, tab_circ, tab_res, tab_teoria = st.tabs(
+        ["Simulacao", "Circuito Equivalente", "Resultados", "Teoria"]
     )
-
-    st.markdown(
-        '<div class="learn-card">'
-        '<h4>Metodos de Partida</h4>'
-        '<p>A corrente de partida direta (DOL) pode atingir 6 a 8 vezes a corrente nominal, '
-        'causando quedas de tensao na rede e tensoes mecanicas no acoplamento.</p>'
-        '<p><span class="up">Y-Delta:</span> reduz a corrente de partida a aproximadamente 1/3 do valor DOL, '
-        'mas tambem reduz o torque de partida na mesma proporcao.</p>'
-        '<p><span class="up">Compensadora (autotransformador):</span> permite escolher o tap '
-        'de reducao de tensao, oferecendo um compromisso entre corrente e torque de partida.</p>'
-        '<p><span class="up">Soft-Starter:</span> rampa de tensao controlada eletronicamente. '
-        'Oferece a transicao mais suave, mas prolonga o transitorio.</p>'
-        '<div class="warn">Qualquer metodo de reducao de tensao na partida tambem reduz o torque disponivel. '
-        'Se o torque de partida for insuficiente para vencer a carga, o motor nao parte '
-        'e superaquece rapidamente.</div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-
-# =============================================================================
-# SECAO 12 — PONTO DE ENTRADA PRINCIPAL
-# =============================================================================
-
-def main():
-    # 1. Sidebar e tema
-    dark_mode = render_sidebar()
-    apply_theme(dark_mode)
-
-    # 2. Cabecalho
-    st.markdown("# Simulador de Maquina de Inducao Trifasica")
-    st.markdown(
-        "Modelo matematico **0dq de Krause** — Gaiola de Esquilo — "
-        "Integracao numerica via **RK4** (scipy.odeint)"
-    )
-    st.divider()
-
-    # 3. Abas principais
-    tab_sim, tab_learn = st.tabs(["Simulacao", "Aprendizado"])
 
     with tab_sim:
-        # 3a. Parametros da maquina
-        mp, ref_code = render_machine_params()
-        st.divider()
+        (mp, ref_code, exp_config,
+         var_keys, var_labels,
+         tmax, h, dark_plot, run_clicked) = render_tab_simulacao()
 
-        # 3b. Configuracao do experimento
-        exp_config = render_experiment_config(mp)
-        st.divider()
-
-        # 3c. Selecao de variaveis
-        var_keys, var_labels = render_variable_selector()
-        st.divider()
-
-        # 3d. Tempo e passo
-        tmax, h = render_time_config()
-        st.divider()
-
-        # 3e. Botao de execucao
-        col_btn, col_info = st.columns([1, 3])
-        with col_btn:
-            run_btn = st.button("Executar Simulacao", use_container_width=True)
-
-        if run_btn:
+        if run_clicked:
             if not var_keys:
-                st.warning("Selecione ao menos uma variavel para plotar.")
+                st.warning("Selecione ao menos uma grandeza para plotar antes de executar.")
             else:
                 vfn, tfn, t_events = build_voltage_and_torque_fns(exp_config, mp)
                 with st.spinner("Executando integracao numerica..."):
                     try:
-                        res = run_simulation(
-                            mp=mp, tmax=tmax, h=h,
-                            voltage_fn=vfn, torque_fn=tfn,
-                            ref_code=ref_code,
-                        )
+                        res = run_simulation(mp=mp, tmax=tmax, h=h,
+                                             voltage_fn=vfn, torque_fn=tfn,
+                                             ref_code=ref_code)
+                        st.session_state["sim_result"] = {
+                            "res": res, "var_keys": var_keys, "var_labels": var_labels,
+                            "t_events": t_events, "dark": dark_plot, "mp": mp,
+                            "exp_config": exp_config,
+                        }
                         st.success(
                             f"Simulacao concluida. "
-                            f"n_final = {res['n'][-1]:.1f} RPM | "
-                            f"Te_final = {res['Te'][-1]:.2f} N.m"
+                            f"n = {res['n'][-1]:.1f} RPM | "
+                            f"Te = {res['Te'][-1]:.2f} N.m"
                         )
-                        render_results(res, var_keys, var_labels, dark_mode, t_events)
                     except Exception as e:
                         st.error(f"Erro na simulacao: {e}")
                         st.info(
@@ -1311,8 +1361,30 @@ def main():
                             "ou parametros fisicamente invalidos podem causar divergencia numerica."
                         )
 
-    with tab_learn:
-        render_learning_tab()
+    with tab_circ:
+        # usa o mp do ultimo resultado se disponivel, senao cria com defaults
+        if st.session_state["sim_result"] is not None:
+            mp_circ = st.session_state["sim_result"]["mp"]
+        else:
+            mp_circ = MachineParams()
+        render_tab_circuito(mp_circ)
+
+    with tab_res:
+        sr = st.session_state.get("sim_result")
+        if sr is None:
+            st.info("Nenhuma simulacao executada ainda. Configure os parametros na aba Simulacao e clique em Executar.")
+        else:
+            render_tab_resultados(
+                res=sr["res"],
+                var_keys=sr["var_keys"],
+                var_labels=sr["var_labels"],
+                dark=sr["dark"],
+                t_events=sr["t_events"],
+                exp_config=sr["exp_config"],
+            )
+
+    with tab_teoria:
+        render_tab_teoria()
 
 
 if __name__ == "__main__":
